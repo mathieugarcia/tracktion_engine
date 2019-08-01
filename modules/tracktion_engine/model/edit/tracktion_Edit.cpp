@@ -876,6 +876,7 @@ void Edit::initialiseTracks()
         updateTrackStatuses();
     }
 
+    ensureArrangerTrack();
     ensureTempoTrack();
     ensureMarkerTrack();
     ensureChordTrack();
@@ -1224,6 +1225,7 @@ Track::Ptr Edit::createTrack (const juce::ValueTree& v)
     if (v.hasType (IDs::AUTOMATIONTRACK))  return createAndInitialiseTrack<AutomationTrack> (*this, v);
     if (v.hasType (IDs::TEMPOTRACK))       return createAndInitialiseTrack<TempoTrack> (*this, v);
     if (v.hasType (IDs::CHORDTRACK))       return createAndInitialiseTrack<ChordTrack> (*this, v);
+    if (v.hasType (IDs::ARRANGERTRACK))    return createAndInitialiseTrack<ArrangerTrack> (*this, v);
 
     jassertfalse;
     return {};
@@ -1833,6 +1835,16 @@ void Edit::sanityCheckTrackNames()
     });
 }
 
+void Edit::ensureArrangerTrack()
+{
+    if (getArrangerTrack() == nullptr)
+    {
+        juce::ValueTree v (IDs::ARRANGERTRACK);
+        v.setProperty (IDs::name, TRANS("Arranger"), nullptr);
+        state.addChild (v, 0, &getUndoManager());
+    }
+}
+
 void Edit::ensureTempoTrack()
 {
     if (getTempoTrack() == nullptr)
@@ -2420,6 +2432,11 @@ juce::Array<AutomatableParameter*> Edit::getAllAutomatableParams (bool includeTr
 }
 
 //==============================================================================
+ArrangerTrack* Edit::getArrangerTrack() const
+{
+    return dynamic_cast<ArrangerTrack*> (findTrackForPredicate (*this, [] (Track& t) { return t.isArrangerTrack(); }));
+}
+
 MarkerTrack* Edit::getMarkerTrack() const
 {
     return dynamic_cast<MarkerTrack*> (findTrackForPredicate (*this, [] (Track& t) { return t.isMarkerTrack(); }));
