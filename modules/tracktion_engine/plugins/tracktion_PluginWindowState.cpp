@@ -96,7 +96,7 @@ void PluginWindowState::showWindow()
         if (lastWindowBounds.isEmpty() || ! windowBoundsIsOnScreen)
             pickDefaultWindowBounds();
 
-        WeakReference<juce::Component> oldFocus (Component::getCurrentlyFocusedComponent());
+        WeakReference<juce::Component> oldFocus (juce::Component::getCurrentlyFocusedComponent());
         pluginWindow = engine.getUIBehaviour().createPluginWindow (*this);
 
         if (oldFocus != nullptr)
