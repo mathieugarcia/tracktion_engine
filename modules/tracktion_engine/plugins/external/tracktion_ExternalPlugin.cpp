@@ -109,7 +109,7 @@ struct AsyncPluginDeleter  : private Timer,
 
         const ScopedValueSetter<bool> setter (recursive, true, false);
 
-        Component modal;
+        juce::Component modal;
         modal.enterModalState (false);
 
         plugins.removeLast();
@@ -131,7 +131,7 @@ void cleanUpDanglingPlugins()
     {
         for (int count = 400; --count > 0 && d->releaseNextDanglingPlugin();)
         {
-            Component modal;
+            juce::Component modal;
             modal.enterModalState (false);
 
             MessageManager::getInstance()->runDispatchLoopUntil (10);
