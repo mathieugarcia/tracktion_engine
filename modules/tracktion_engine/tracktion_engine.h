@@ -53,6 +53,13 @@
 
 #undef __TEXT
 
+/** Config: TRACKTION_ENABLE_SINGLETONS
+    Enables singleton access to Engine and ProjectManager. Legacy use only
+*/
+#ifndef TRACKTION_ENABLE_SINGLETONS
+ #define TRACKTION_ENABLE_SINGLETONS 0
+#endif
+
 /** Config: TRACKTION_ENABLE_ARA
     Enables ARA support.
     You must have the ARA SDK in the search path in order to use this.
@@ -298,6 +305,7 @@ namespace tracktion_engine
 #include "utilities/tracktion_AudioFadeCurve.h"
 #include "utilities/tracktion_Spline.h"
 #include "utilities/tracktion_Ditherer.h"
+#include "utilities/tracktion_ExternalPlayheadSynchroniser.h"
 #include "selection/tracktion_Selectable.h"
 #include "selection/tracktion_SelectableClass.h"
 #include "selection/tracktion_SelectionManager.h"
@@ -525,6 +533,7 @@ namespace tracktion_engine
 #include "plugins/effects/tracktion_Delay.h"
 #include "plugins/effects/tracktion_Chorus.h"
 #include "plugins/effects/tracktion_FourOscPlugin.h"
+#include "plugins/effects/tracktion_LatencyPlugin.h"
 #include "plugins/effects/tracktion_LowPass.h"
 #include "plugins/effects/tracktion_MidiModifier.h"
 #include "plugins/effects/tracktion_MidiPatchBay.h"

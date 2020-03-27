@@ -39,11 +39,14 @@ using namespace juce;
 namespace tracktion_engine
 {
     #include "3rd_party/soundtouch/source/SoundTouch/BPMDetect.cpp"
+    #undef max
     #include "3rd_party/soundtouch/source/SoundTouch/PeakFinder.cpp"
+    #undef max
     #include "3rd_party/soundtouch/source/SoundTouch/FIFOSampleBuffer.cpp"
 
    #if TRACKTION_ENABLE_TIMESTRETCH_SOUNDTOUCH
     #include "3rd_party/soundtouch/source/SoundTouch/AAFilter.cpp"
+    #undef PI
     #include "3rd_party/soundtouch/source/SoundTouch/cpu_detect_x86.cpp"
     #include "3rd_party/soundtouch/source/SoundTouch/FIRFilter.cpp"
     #include "3rd_party/soundtouch/source/SoundTouch/InterpolateCubic.cpp"

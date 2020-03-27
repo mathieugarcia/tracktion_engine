@@ -11,8 +11,12 @@
 #if ! JUCE_PROJUCER_LIVE_BUILD
 
 #ifdef __APPLE__
+ #define Point CarbonDummyPointName
+ #define AudioBuffer DummyAudioBufferName
  #include <AudioUnit/AudioUnit.h>
  #include <AudioUnit/AUComponent.h>
+ #undef AudioBuffer
+ #undef Point
 #endif
 
 #include <atomic>
@@ -48,6 +52,7 @@ using namespace juce;
 #include "plugins/effects/tracktion_Compressor.cpp"
 #include "plugins/effects/tracktion_Delay.cpp"
 #include "plugins/effects/tracktion_FourOscPlugin.cpp"
+#include "plugins/effects/tracktion_LatencyPlugin.cpp"
 #include "plugins/effects/tracktion_Equaliser.cpp"
 #include "plugins/effects/tracktion_LowPass.cpp"
 #include "plugins/effects/tracktion_MidiModifier.cpp"
@@ -59,5 +64,7 @@ using namespace juce;
 #include "plugins/effects/tracktion_SamplerPlugin.cpp"
 
 #include "plugins/ARA/tracktion_MelodyneFileReader.cpp"
+
+#include "plugins/tracktion_tests_Plugins.cpp"
 
 #endif

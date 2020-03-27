@@ -14,7 +14,7 @@ namespace tracktion_engine
 class MidiControllerParser  : private AsyncUpdater
 {
 public:
-    MidiControllerParser() = default;
+    MidiControllerParser (Engine& e) : engine (e) {}
 
     void processMessage (const MidiMessage& m)
     {
@@ -98,7 +98,7 @@ private:
             pendingMessages.swapWith (messages);
         }
 
-        if (auto pcm = ParameterControlMappings::getCurrentlyFocusedMappings())
+        if (auto pcm = ParameterControlMappings::getCurrentlyFocusedMappings (engine))
             for (const auto& m : messages)
                 pcm->sendChange (m.controllerID, m.newValue, m.channel);
     }
@@ -114,6 +114,7 @@ private:
         float newValue;
     };
 
+    Engine& engine;
     Array<Message> pendingMessages;
     CriticalSection pendingLock;
 };
@@ -207,8 +208,8 @@ void MidiInputDevice::setEnabled (bool b)
     {
         CRASH_TRACER
         enabled = b;
-        MouseCursor::showWaitCursor();
-
+        ScopedWaitCursor waitCursor;
+        
         if (b)
         {
             enabled = false;
@@ -238,8 +239,6 @@ void MidiInputDevice::setEnabled (bool b)
 
         if (! isTrackDevice())
             engine.getExternalControllerManager().midiInOutDevicesChanged();
-
-        MouseCursor::hideWaitCursor();
     }
 }
 
@@ -709,7 +708,7 @@ public:
 
         for (auto track : getTargetTracks())
         {
-            if (! isRecordingActive (*track))
+            if (! activeTracks.contains (track))
                 continue;
                 
             if (isLooping && recordingEnd > loopRange.end)

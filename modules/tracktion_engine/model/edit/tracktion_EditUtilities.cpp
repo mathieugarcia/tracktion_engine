@@ -13,7 +13,7 @@ namespace tracktion_engine
 
 juce::File getEditFileFromProjectManager (Edit& edit)
 {
-    if (auto item = ProjectManager::getInstance()->getProjectItem (edit))
+    if (auto item = edit.engine.getProjectManager().getProjectItem (edit))
         return item->getSourceFile();
 
     return {};
@@ -27,6 +27,37 @@ bool referencesProjectItem (Edit& edit, ProjectItemID itemID)
                 return true;
 
     return false;
+}
+
+//==============================================================================
+//==============================================================================
+void insertSpaceIntoEdit (Edit& edit, EditTimeRange timeRange)
+{
+    const bool doTempoTrackFirst = ! edit.getTimecodeFormat().isBarsBeats();
+    const auto time = timeRange.getStart();
+    const auto length = timeRange.getLength();
+
+    if (doTempoTrackFirst)
+        edit.getTempoTrack()->insertSpaceIntoTrack (time, length);
+
+    for (auto ct : getTracksOfType<ClipTrack> (edit, true))
+    {
+        ct->splitAt (time);
+        ct->insertSpaceIntoTrack (time, length);
+    }
+
+    if (! doTempoTrackFirst)
+        edit.getTempoTrack()->insertSpaceIntoTrack (time, length);
+}
+
+void insertSpaceIntoEditFromBeatRange (Edit& edit, juce::Range<double> beatRange)
+{
+    auto& ts = edit.tempoSequence;
+    const double timeToInsertAt = ts.beatsToTime (beatRange.getStart());
+    auto& tempoAtInsertionPoint = ts.getTempoAt (timeToInsertAt);
+
+    const double lengthInTimeToInsert = beatRange.getLength() * tempoAtInsertionPoint.getApproxBeatLength();
+    insertSpaceIntoEdit (edit, EditTimeRange::withStartAndLength (timeToInsertAt, lengthInTimeToInsert));
 }
 
 //==============================================================================
@@ -362,6 +393,9 @@ void deleteRegionOfTracks (Edit& edit, EditTimeRange rangeToDelete, bool onlySel
 
     for (auto p : pluginsInRacks)
         removeAutomationRangeOfPlugin (*p);
+
+    // N.B. Delete tempo last
+    edit.tempoSequence.deleteRegion (rangeToDelete);
 }
 
 void moveSelectedClips (const SelectableList& selectedObjectsIn, Edit& edit, MoveClipAction mode, bool automationLocked)
@@ -581,11 +615,11 @@ MidiNote* findNoteForState (const Edit& edit, const juce::ValueTree& v)
     return result;
 }
 
-void mergeMidiClips (juce::Array<MidiClip*> clips)
+juce::Result mergeMidiClips (juce::Array<MidiClip*> clips)
 {
     for (auto c : clips)
         if (c->getClipTrack() == nullptr || c->getClipTrack()->isFrozen (Track::anyFreeze))
-            return;
+            return juce::Result::fail (TRANS("Unable to merge clips on frozen tracks"));
 
     TrackItem::sortByTime (clips);
 
@@ -628,10 +662,14 @@ void mergeMidiClips (juce::Array<MidiClip*> clips)
                 newClip->getSequence().addFrom (destinationList, &track->edit.getUndoManager());
 
                 for (int i = clips.size(); --i >= 0;)
-                    clips.getUnchecked(i)->removeFromParentTrack();
+                    clips.getUnchecked (i)->removeFromParentTrack();
             }
+
+            return juce::Result::ok();
         }
     }
+
+    return juce::Result::fail (TRANS("No clips to merge"));
 }
 
 //==============================================================================
@@ -679,6 +717,19 @@ bool areAnyPluginsMissing (const Edit& edit)
 
     return false;
 }
+
+juce::Array<RackInstance*> getRackInstancesInEditForType (const RackType& rt)
+{
+    Array<RackInstance*> instances;
+
+    for (auto p : getAllPlugins (rt.edit, false))
+        if (auto ri = dynamic_cast<RackInstance*> (p))
+            if (ri->type == &rt)
+                instances.add (ri);
+
+    return instances;
+}
+
 
 //==============================================================================
 juce::Array<AutomatableEditItem*> getAllAutomatableEditItems (const Edit& edit)

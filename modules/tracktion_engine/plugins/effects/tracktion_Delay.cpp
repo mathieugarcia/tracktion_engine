@@ -106,8 +106,8 @@ void DelayPlugin::restorePluginStateFromValueTree (const juce::ValueTree& v)
     copyPropertiesToNullTerminatedCachedValues (v, cvsFloat);
     copyPropertiesToNullTerminatedCachedValues (v, cvsInt);
 
-    feedbackDb->setParameter (feedbackValue, sendNotification);
-    mixProportion->setParameter (mixValue, sendNotification);
+    for (auto p : getAutomatableParameters())
+        p->updateFromAttachedValue();
 }
 
 #if TRACKTION_UNIT_TESTS
@@ -128,7 +128,7 @@ public:
 private:
     void runRestoreStateTests()
     {
-        auto edit = Edit::createSingleTrackEdit (Engine::getInstance());
+        auto edit = Edit::createSingleTrackEdit (*Engine::getEngines()[0]);
 
         beginTest ("Delay plugin instantiation");
         {

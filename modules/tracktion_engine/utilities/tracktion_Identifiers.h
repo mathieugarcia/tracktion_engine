@@ -185,6 +185,7 @@ namespace IDs
     DECLARE_ID (panLaw)
     DECLARE_ID (busNum)
     DECLARE_ID (auxSendSliderPos)
+    DECLARE_ID (lastVolumeBeforeMuteDb)
     DECLARE_ID (depthMs)
     DECLARE_ID (speedHz)
     DECLARE_ID (width)
@@ -386,6 +387,7 @@ namespace IDs
     DECLARE_ID (current)
     DECLARE_ID (volDb)
     DECLARE_ID (sendBankChange)
+    DECLARE_ID (grooveStrength)
     DECLARE_ID (showingNoteAutomation)
     DECLARE_ID (mpeMode)
     DECLARE_ID (originalLength)
@@ -465,6 +467,7 @@ namespace IDs
     DECLARE_ID (compGroup)
     DECLARE_ID (midiVProp)
     DECLARE_ID (midiVOffset)
+    DECLARE_ID (midiNoteMap)
     DECLARE_ID (ghostTracks)
     DECLARE_ID (OUTPUTDEVICES)
     DECLARE_ID (DEVICE)
@@ -621,6 +624,7 @@ namespace IDs
     DECLARE_ID (chorusMix)
     DECLARE_ID (ARRANGERTRACK)
     DECLARE_ID (ARRANGERCLIP)
+    DECLARE_ID (apply)
     
     #undef DECLARE_ID
 }

@@ -75,7 +75,7 @@ static String expandPatterns (Edit& ed, const String& s, Track* track, int take)
     if (track != nullptr)
         trackName = File::createLegalFileName (track->getName());
 
-    if (auto proj = ProjectManager::getInstance()->getProject (ed))
+    if (auto proj = ed.engine.getProjectManager().getProject (ed))
     {
         projDir = proj->getDirectoryForMedia (ProjectItem::Category::recorded).getFullPathName();
     }
@@ -258,10 +258,10 @@ public:
 
         do
         {
-            AudioTrack* firstActiveTarget = getTargetTracks().getFirst();
+            auto firstActiveTarget = getTargetTracks().getFirst();
             for (auto t : getTargetTracks())
             {
-                if (isRecordingActive (*t))
+                if (activeTracks.contains (t))
                 {
                     firstActiveTarget = t;
                     break;
@@ -298,18 +298,17 @@ public:
         return Result::ok();
     }
 
-    String prepareToRecord (double playStart, double punchIn, double sr, int blockSizeSamples, bool isLivePunch) override
+    String prepareToRecord (double playStart, double punchIn, double sr, int /*blockSizeSamples*/, bool isLivePunch) override
     {
         CRASH_TRACER
 
         String error;
-        inputBuffer.setSize (2, blockSizeSamples);
 
         JUCE_TRY
         {
             closeFileWriter();
 
-            if (auto proj = ProjectManager::getInstance()->getProject (edit))
+            if (auto proj = owner.engine.getProjectManager().getProject (edit))
                 if (proj->isReadOnly())
                     return TRANS("The current project is read-only, so new clips can't be recorded into it!");
 
@@ -328,7 +327,7 @@ public:
             AudioFileUtils::addBWAVStartToMetadata (metadata, (int64) (playStart * sr));
             auto& wi = getWaveInput();
 
-            rc->fileWriter.reset (new AudioFileWriter (AudioFile (recordedFile), format,
+            rc->fileWriter.reset (new AudioFileWriter (AudioFile (edit.engine, recordedFile), format,
                                                        wi.isStereoPair() ? 2 : 1,
                                                        sr, wi.bitDepth, metadata, 0));
 
@@ -404,6 +403,14 @@ public:
     {
         const ScopedLock sl (consumerLock);
         // This is probably where we should set up our recording context
+
+        // We need to keep a list of tracks the are being recorded to
+        // here, since user may un-arm track to stop recording
+        activeTracks.clear();
+
+        for (auto destTrack : getTargetTracks())
+            if (isRecordingActive (*destTrack))
+                activeTracks.add (destTrack);
 
         return true;
     }
@@ -523,7 +530,7 @@ public:
             if (! rc->file.existsAsFile() || rc->file.getSize() == 0)
                 return {};
 
-            const AudioFile recordedFile (rc->file);
+            const AudioFile recordedFile (edit.engine, rc->file);
             auto recordingDestTracks = getTargetTracks();
 
             if (discardRecordings || recordingDestTracks.size() == 0)
@@ -535,9 +542,9 @@ public:
             bool firstTrack = true;
             for (auto destTrack : recordingDestTracks)
             {
-                if (isRecordingActive (*destTrack))
+                if (activeTracks.contains (destTrack))
                 {
-                    AudioFile trackRecordedFile;
+                    AudioFile trackRecordedFile (edit.engine);
                     if (firstTrack)
                     {
                         trackRecordedFile = recordedFile;
@@ -556,7 +563,7 @@ public:
 
                         rc->file.copyFileTo (f);
 
-                        trackRecordedFile = AudioFile (f);
+                        trackRecordedFile = AudioFile (edit.engine, f);
                     }
 
                     auto clipsCreated = applyLastRecording (*rc, trackRecordedFile, *destTrack,
@@ -619,7 +626,7 @@ public:
             return {};
         }
 
-        if (auto proj = ProjectManager::getInstance()->getProject (edit))
+        if (auto proj = engine.getProjectManager().getProject (edit))
         {
             if (auto projectItem = proj->createNewItem (recordedFile.getFile(),
                                                         ProjectItem::waveItemType(),
@@ -725,7 +732,7 @@ public:
         for (auto& f : filesCreated)
         {
             AudioFileUtils::applyBWAVStartTime (f, (int64) (newClip->getPosition().getStartOfSource() * rc.sampleRate));
-            afm.forceFileUpdate (AudioFile (f));
+            afm.forceFileUpdate (AudioFile (edit.engine, f));
         }
 
         if (auto wc = dynamic_cast<WaveAudioClip*> (newClip.get()))
@@ -774,7 +781,7 @@ public:
 
             afm.releaseFile (recordedFile);
 
-            if (AudioFileUtils::copySectionToNewFile (recordedFile.getFile(), takeFile, takeRange) < 0)
+            if (AudioFileUtils::copySectionToNewFile (edit.engine, recordedFile.getFile(), takeFile, takeRange) < 0)
                 return false;
 
             if (projectItem != nullptr)
@@ -800,7 +807,7 @@ public:
         // chop down the original wave file..
         auto tempFile = recordedFile.getFile().getNonexistentSibling (false);
 
-        if (AudioFileUtils::copySectionToNewFile (recordedFile.getFile(), tempFile, EditTimeRange (0.0, loopLength)) > 0)
+        if (AudioFileUtils::copySectionToNewFile (edit.engine, recordedFile.getFile(), tempFile, EditTimeRange (0.0, loopLength)) > 0)
         {
             afm.releaseFile (recordedFile);
             tempFile.moveFileTo (recordedFile.getFile());
@@ -857,7 +864,7 @@ public:
             StringPairArray metadata;
 
             {
-                AudioFileWriter writer (AudioFile (recordedFile), format,
+                AudioFileWriter writer (AudioFile (dstTrack->edit.engine, recordedFile), format,
                                         recordBuffer->numChannels,
                                         recordBuffer->sampleRate,
                                         wi.bitDepth, metadata, 0);
@@ -878,7 +885,7 @@ public:
                 }
             }
 
-            auto proj = ProjectManager::getInstance()->getProject (edit);
+            auto proj = owner.engine.getProjectManager().getProject (edit);
 
             if (proj == nullptr)
             {
@@ -897,7 +904,7 @@ public:
 
             auto clipName = getNewClipName (*dstTrack);
             double start = 0;
-            double recordedLength = AudioFile (recordedFile).getLength();
+            double recordedLength = AudioFile (dstTrack->edit.engine, recordedFile).getLength();
 
             if (context.playhead.isPlaying() || recordBuffer->wasRecentlyPlaying (edit))
             {
@@ -940,7 +947,7 @@ public:
             CRASH_TRACER
 
             AudioFileUtils::applyBWAVStartTime (recordedFile, (int64) (newClip->getPosition().getStartOfSource() * recordBuffer->sampleRate));
-            edit.engine.getAudioFileManager().forceFileUpdate (AudioFile (recordedFile));
+            edit.engine.getAudioFileManager().forceFileUpdate (AudioFile (dstTrack->edit.engine, recordedFile));
 
             if (selectionManager != nullptr)
             {
@@ -1105,9 +1112,8 @@ protected:
     static void closeFileWriter (RecordingContext& rc)
     {
         CRASH_TRACER
-        auto localCopy = std::move (rc.fileWriter);
 
-        if (localCopy != nullptr)
+        if (auto localCopy = std::move (rc.fileWriter))
             rc.engine.getWaveInputRecordingThread().waitForWriterToFinish (*localCopy);
     }
 
@@ -1712,7 +1718,7 @@ struct WaveInputRecordingThread::BlockQueue
 
     struct QueuedBlock
     {
-        QueuedBlock() {}
+        QueuedBlock() = default;
 
         void load (AudioFileWriter& w, const juce::AudioBuffer<float>& newBuffer,
                    int start, int numSamples, const RecordingThumbnailManager::Thumbnail::Ptr& thumb)
@@ -1726,7 +1732,7 @@ struct WaveInputRecordingThread::BlockQueue
             thumbnail = thumb;
         }
 
-        AudioFileWriter* writer = nullptr;
+        std::atomic<AudioFileWriter*> writer { nullptr };
         QueuedBlock* next = nullptr;
         juce::AudioBuffer<float> buffer { 2, 512 };
         RecordingThumbnailManager::Thumbnail::Ptr thumbnail;
@@ -1738,7 +1744,7 @@ struct WaveInputRecordingThread::BlockQueue
     QueuedBlock* firstPending = nullptr;
     QueuedBlock* lastPending = nullptr;
     QueuedBlock* firstFree = nullptr;
-    int numPending = 0;
+    std::atomic<int> numPending { 0 };
 
     QueuedBlock* findFreeBlock()
     {
@@ -1757,6 +1763,7 @@ struct WaveInputRecordingThread::BlockQueue
     {
         jassert (b != nullptr);
         const ScopedLock sl (freeQueueLock);
+        b->writer = nullptr;
         b->next = firstFree;
         firstFree = b;
     }
@@ -1780,7 +1787,7 @@ struct WaveInputRecordingThread::BlockQueue
     {
         const ScopedLock sl (pendingQueueLock);
 
-        if (auto* b = firstPending)
+        if (auto b = firstPending)
         {
             firstPending = b->next;
 
@@ -1796,7 +1803,7 @@ struct WaveInputRecordingThread::BlockQueue
 
     void moveAnyPendingBlocksToFree() noexcept
     {
-        while (auto* b = removeFirstPending())
+        while (auto b = removeFirstPending())
             addToFreeQueue (b);
 
         jassert (numPending == 0);
@@ -1807,7 +1814,7 @@ struct WaveInputRecordingThread::BlockQueue
     {
         const ScopedLock sl (pendingQueueLock);
 
-        for (auto* b = firstPending; b != nullptr; b = b->next)
+        for (auto b = firstPending; b != nullptr; b = b->next)
             if (b->writer == &writer)
                 return true;
 
@@ -1816,7 +1823,7 @@ struct WaveInputRecordingThread::BlockQueue
 
     void deleteFreeQueue() noexcept
     {
-        auto* b = firstFree;
+        auto b = firstFree;
         firstFree = nullptr;
 
         while (b != nullptr)
@@ -1860,7 +1867,7 @@ void WaveInputRecordingThread::addBlockToRecord (AudioFileWriter& writer, const 
 {
     if (! threadShouldExit())
     {
-        auto* block = queue->findFreeBlock();
+        auto block = queue->findFreeBlock();
         block->load (writer, buffer, start, numSamples, thumbnail);
         queue->addToPendingQueue (block);
         notify();
@@ -1886,9 +1893,9 @@ void WaveInputRecordingThread::run()
             TRACKTION_LOG_ERROR ("Audio recording can't keep up!");
         }
 
-        if (auto* block = queue->removeFirstPending())
+        if (auto block = queue->removeFirstPending())
         {
-            if (! block->writer->appendBuffer (block->buffer, block->buffer.getNumSamples()))
+            if (! block->writer.load()->appendBuffer (block->buffer, block->buffer.getNumSamples()))
             {
                 if (! hasSentStop)
                 {

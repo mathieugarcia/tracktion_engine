@@ -35,6 +35,64 @@ namespace Helpers
         }
         return {};
     }
+<<<<<<< HEAD
+=======
+}
+
+//==============================================================================
+namespace PlayHeadHelpers
+{
+    // Quick-and-dirty function to format a timecode string
+    static inline String timeToTimecodeString (double seconds)
+    {
+        auto millisecs = roundToInt (seconds * 1000.0);
+        auto absMillisecs = std::abs (millisecs);
+
+        return String::formatted ("%02d:%02d:%02d.%03d",
+                                  millisecs / 3600000,
+                                  (absMillisecs / 60000) % 60,
+                                  (absMillisecs / 1000)  % 60,
+                                  absMillisecs % 1000);
+    }
+
+    // Quick-and-dirty function to format a bars/beats string
+    static inline String quarterNotePositionToBarsBeatsString (double quarterNotes, int numerator, int denominator)
+    {
+        if (numerator == 0 || denominator == 0)
+            return "1|1|000";
+
+        auto quarterNotesPerBar = (numerator * 4 / denominator);
+        auto beats  = (fmod (quarterNotes, quarterNotesPerBar) / quarterNotesPerBar) * numerator;
+
+        auto bar    = ((int) quarterNotes) / quarterNotesPerBar + 1;
+        auto beat   = ((int) beats) + 1;
+        auto ticks  = ((int) (fmod (beats, 1.0) * 960.0 + 0.5));
+
+        return String::formatted ("%d|%d|%03d", bar, beat, ticks);
+    }
+
+    // Returns a textual description of a CurrentPositionInfo
+    static inline String getTimecodeDisplay (const AudioPlayHead::CurrentPositionInfo& pos)
+    {
+        MemoryOutputStream displayText;
+
+        displayText << String (pos.bpm, 2) << " bpm, "
+                    << pos.timeSigNumerator << '/' << pos.timeSigDenominator
+                    << "  -  " << timeToTimecodeString (pos.timeInSeconds)
+                    << "  -  " << quarterNotePositionToBarsBeatsString (pos.ppqPosition,
+                                                                        pos.timeSigNumerator,
+                                                                        pos.timeSigDenominator);
+
+        if (pos.isRecording)
+            displayText << "  (recording)";
+        else if (pos.isPlaying)
+            displayText << "  (playing)";
+        else
+            displayText << "  (stopped)";
+
+        return displayText.toString();
+    }
+>>>>>>> 9e2c201b3d8118502745ce9100279d7f484b16a4
 }
 
 //==============================================================================
@@ -43,7 +101,7 @@ namespace EngineHelpers
     te::Project::Ptr createTempProject (te::Engine& engine)
     {
         auto file = engine.getTemporaryFileManager().getTempDirectory().getChildFile ("temp_project").withFileExtension (te::projectFileSuffix);
-        te::ProjectManager::TempProject tempProject (*te::ProjectManager::getInstance(), file, true);
+        te::ProjectManager::TempProject tempProject (engine.getProjectManager(), file, true);
         return tempProject.project;
     }
 
@@ -98,7 +156,7 @@ namespace EngineHelpers
             removeAllClips (*track);
 
             // Add a new clip to this track
-            te::AudioFile audioFile (file);
+            te::AudioFile audioFile (edit.engine, file);
 
             if (audioFile.isValid())
                 if (auto newClip = track->insertWaveClip (file.getFileNameWithoutExtension(), file,
@@ -283,7 +341,7 @@ struct Thumbnail    : public Component
 
 private:
     te::TransportControl& transport;
-    te::SmartThumbnail smartThumbnail { transport.engine, te::AudioFile(), *this, nullptr };
+    te::SmartThumbnail smartThumbnail { transport.engine, te::AudioFile (transport.engine), *this, nullptr };
     DrawableRectangle cursor;
     te::LambdaTimer cursorUpdater;
 

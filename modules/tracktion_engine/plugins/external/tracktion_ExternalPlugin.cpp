@@ -42,10 +42,26 @@ struct ExternalPlugin::ProcessorChangedManager  : public juce::AudioProcessorLis
             plugin.edit.getTransport().triggerClearDevicesOnStop();
 
         if (auto pi = plugin.getAudioPluginInstance())
+        {
             pi->refreshParameterList();
+            
+            // refreshParameterList can delete the AudioProcessorParameter that our ExternalAutomatableParameters
+            // are listening too so re-attach any possibly deleted listeners here
+            for (auto p : plugin.autoParamForParamNumbers)
+            {
+                if (p != nullptr)
+                {
+                    p->unregisterAsListener();
+                    p->registerAsListener();
+                }
+            }
+        }
         else
+        {
             jassertfalse;
+        }
 
+        plugin.refreshParameterValues();
         plugin.changed();
         plugin.edit.pluginChanged (plugin);
     }
@@ -582,6 +598,13 @@ void ExternalPlugin::buildParameterList()
     buildParameterTree();
 }
 
+void ExternalPlugin::refreshParameterValues()
+{
+    for (auto p : autoParamForParamNumbers)
+        if (p != nullptr)
+            p->valueChangedByPlugin();
+}
+
 std::unique_ptr<PluginDescription> ExternalPlugin::findDescForUID (int uid) const
 {
     if (uid != 0)
@@ -784,7 +807,8 @@ void ExternalPlugin::flushPluginStateToValueTree()
 
     if (pluginInstance != nullptr)
     {
-        state.setProperty (IDs::programNum, pluginInstance->getCurrentProgram(), um);
+		if (pluginInstance->getNumPrograms() > 0)
+			state.setProperty (IDs::programNum,  pluginInstance->getCurrentProgram(), um);
 
         TRACKTION_ASSERT_MESSAGE_THREAD
         MemoryBlock chunk;
@@ -1119,13 +1143,20 @@ void ExternalPlugin::prepareIncomingMidiMessages (MidiMessageArray& incoming, in
         if (supportsMPE)
             mpeRemapper->remapMidiChannelIfNeeded (m);
 
+        if (m.isNoteOn())
+        {
+            if (activeNotes.isNoteActive (m.getChannel(), m.getNoteNumber()))
+                continue;
+            
+            activeNotes.startNote (m.getChannel(), m.getNoteNumber());
+        }
+        else if (m.isNoteOff())
+        {
+            activeNotes.clearNote (m.getChannel(), m.getNoteNumber());
+        }
+
         auto sample = jlimit (0, numSamples - 1, (int) (m.getTimeStamp() * sampleRate));
         midiBuffer.addEvent (m, sample);
-
-        if (m.isNoteOn())
-            activeNotes.startNote (m.getChannel(), m.getNoteNumber());
-        else if (m.isNoteOff())
-            activeNotes.clearNote (m.getChannel(), m.getNoteNumber());
     }
 
    #if 0
@@ -1150,6 +1181,7 @@ void ExternalPlugin::applyToBuffer (const AudioRenderContext& fc)
     {
         CRASH_TRACER_PLUGIN (getDebugName());
         const ScopedLock sl (lock);
+        jassert (isInstancePrepared);
 
         if (playhead != nullptr)
             playhead->setCurrentContext (&fc);
@@ -1427,10 +1459,7 @@ void ExternalPlugin::setCurrentProgram (int index, bool sendChangeMessage)
             if (sendChangeMessage)
             {
                 changed();
-
-                for (auto p : autoParamForParamNumbers)
-                    if (p != nullptr)
-                        p->valueChangedByPlugin();
+                refreshParameterValues();
             }
         }
     }

@@ -206,10 +206,12 @@ struct ProjectItemPastingOptions
     bool snapBWavsToOriginalTime = false;
 };
 
-static void askUserAboutProjectItemPastingOptions (const Clipboard::ProjectItems& items, UIBehaviour& ui,
+static void askUserAboutProjectItemPastingOptions (Engine& engine,
+                                                   const Clipboard::ProjectItems& items,
                                                    ProjectItemPastingOptions& options)
 {
-    auto& pm = *ProjectManager::getInstance();
+    auto& pm = engine.getProjectManager();
+    auto& ui = engine.getUIBehaviour();
 
     bool importedMIDIFilesHaveTempoChanges = false;
     int numAudioClips = 0;
@@ -232,7 +234,7 @@ static void askUserAboutProjectItemPastingOptions (const Clipboard::ProjectItems
                 {
                     ++numAudioClips;
 
-                    if (AudioFile (file).getMetadata()[WavAudioFormat::bwavTimeReference].isNotEmpty())
+                    if (AudioFile (engine, file).getMetadata()[WavAudioFormat::bwavTimeReference].isNotEmpty())
                         ++numAudioClipsWithBWAV;
                 }
             }
@@ -288,7 +290,7 @@ static void askUserAboutProjectItemPastingOptions (const Clipboard::ProjectItems
 
 bool isRecursiveEditClipPaste (const Clipboard::ProjectItems& items, Edit& edit)
 {
-    auto& pm = *ProjectManager::getInstance();
+    auto& pm = edit.engine.getProjectManager();
 
     for (auto& item : items.itemIDs)
         if (auto source = pm.getProjectItem (item.itemID))
@@ -300,7 +302,8 @@ bool isRecursiveEditClipPaste (const Clipboard::ProjectItems& items, Edit& edit)
 
 bool Clipboard::ProjectItems::pasteIntoEdit (const EditPastingOptions& options) const
 {
-    auto& pm = *ProjectManager::getInstance();
+    auto& e  = options.edit.engine;
+    auto& pm = e.getProjectManager();
     auto& ui = options.edit.engine.getUIBehaviour();
     bool anythingPasted = false;
 
@@ -309,7 +312,7 @@ bool Clipboard::ProjectItems::pasteIntoEdit (const EditPastingOptions& options) 
     pastingOptions.separateTracks = options.preferredLayout == FileDragList::vertical;
 
     if (! options.silent)
-        askUserAboutProjectItemPastingOptions (*this, ui, pastingOptions);
+        askUserAboutProjectItemPastingOptions (e, *this, pastingOptions);
 
     if (isRecursiveEditClipPaste (*this, options.edit))
     {
@@ -399,7 +402,7 @@ bool Clipboard::ProjectItems::pasteIntoEdit (const EditPastingOptions& options) 
 bool Clipboard::ProjectItems::pasteIntoProject (Project& project) const
 {
     for (auto& item : itemIDs)
-        if (auto source = ProjectManager::getInstance()->getProjectItem (item.itemID))
+        if (auto source = project.engine.getProjectManager().getProjectItem (item.itemID))
             if (auto newItem = project.createNewItem (source->getSourceFile(),
                                                       source->getType(),
                                                       source->getName(),
@@ -564,7 +567,8 @@ static void fixClipTimes (ValueTree& state, const Clipboard::Clips::ClipInfo& cl
 
     if (clip.hasBeatTimes)
     {
-        auto range = tempoSequence.beatsToTime ({ clip.startBeats, clip.startBeats + clip.lengthBeats }) + startOffset;
+        auto offsetInBeats = tempoSequence.timeToBeats (startOffset);
+        auto range = tempoSequence.beatsToTime ({ offsetInBeats + clip.startBeats, offsetInBeats + clip.startBeats + clip.lengthBeats });
         start  = range.getStart();
         length = range.getLength();
         offset = clip.offsetBeats / tempoSequence.getBeatsPerSecondAt (start);
@@ -915,14 +919,12 @@ Clipboard::TempoChanges::TempoChanges (const TempoSequence& ts, EditTimeRange ra
     bool pointAtStart = false;
     bool pointAtEnd   = false;
 
-    for (int i = 0; i < ts.getNumTempos(); ++i)
+    for (auto t : ts.getTempos())
     {
-        auto t = ts.getTempo(i);
-
         if (t->startBeatNumber == startBeat) pointAtStart = true;
         if (t->startBeatNumber == endBeat)   pointAtEnd   = true;
 
-        if (range.contains (t->getStartTime()))
+        if (range.containsInclusive (t->getStartTime()))
             changes.push_back ({ t->startBeatNumber - startBeat,
                                  t->getBpm(),
                                  t->getCurve() });
@@ -944,36 +946,37 @@ Clipboard::TempoChanges::~TempoChanges() {}
 
 bool Clipboard::TempoChanges::pasteIntoEdit (const EditPastingOptions& options) const
 {
-    return pasteTempoSequence (options.edit.tempoSequence, options.edit, {});
+    return pasteTempoSequence (options.edit.tempoSequence, EditTimeRange::emptyRange (options.startTime));
 }
 
-bool Clipboard::TempoChanges::pasteTempoSequence (TempoSequence& ts, Edit& edit, EditTimeRange targetRange) const
+bool Clipboard::TempoChanges::pasteTempoSequence (TempoSequence& ts, EditTimeRange targetRange) const
 {
     if (changes.empty())
         return false;
 
-    auto startTime = edit.getTransport().position.get();
-
     EditTimecodeRemapperSnapshot snap;
     snap.savePreChangeState (ts.edit);
 
-    auto length = changes.back().beat;
+    auto lengthInBeats = changes.back().beat;
 
     if (targetRange.isEmpty())
-        targetRange = { startTime, startTime + length };
+        targetRange = targetRange.withEnd (ts.beatsToTime (ts.timeToBeats (targetRange.getStart()) + lengthInBeats));
 
     auto startBeat = std::floor (ts.timeToBeats (targetRange.getStart()) + 0.5);
     auto endBeat   = std::floor (ts.timeToBeats (targetRange.getEnd())   + 0.5);
 
+    double finalBPM = ts.getBpmAt (ts.beatsToTime (endBeat));
     ts.removeTemposBetween (ts.beatsToTime ({ startBeat, endBeat }), false);
     ts.insertTempo (ts.beatsToTime (startBeat));
-    ts.insertTempo (ts.beatsToTime (endBeat));
 
     for (auto& tc : changes)
-        ts.insertTempo (roundToInt ((tc.beat / length) * (endBeat - startBeat) + startBeat),
+        ts.insertTempo (roundToInt ((tc.beat / lengthInBeats) * (endBeat - startBeat) + startBeat),
                         tc.bpm, tc.curve);
 
-    for (int i = ts.getNumTempos(); --i >= 0;)
+    ts.insertTempo (ts.beatsToTime (endBeat));
+    ts.insertTempo (endBeat, finalBPM, 1.0f);
+
+    for (int i = ts.getNumTempos(); --i >= 1;)
     {
         auto tcurr = ts.getTempo (i);
         auto tprev = ts.getTempo (i - 1);
@@ -987,6 +990,150 @@ bool Clipboard::TempoChanges::pasteTempoSequence (TempoSequence& ts, Edit& edit,
     snap.remapEdit (ts.edit);
     return true;
 }
+
+//==============================================================================
+//==============================================================================
+class ClipboardTempoTests   : public UnitTest
+{
+public:
+    ClipboardTempoTests() : UnitTest ("ClipboardTempoTests", "Tracktion") {}
+
+    //==============================================================================
+    void runTest() override
+    {
+        runCopyTests();
+        runCopyTestsUsingBeatInsertion();
+    }
+
+private:
+    void expectTempoSetting (TempoSetting& tempo, double bpm, float curve)
+    {
+        expectWithinAbsoluteError (tempo.getBpm(), bpm, 0.001);
+        expectWithinAbsoluteError (tempo.getCurve(), curve, 0.001f);
+    }
+
+    void runCopyTests()
+    {
+        auto edit = Edit::createSingleTrackEdit (*Engine::getEngines()[0]);
+        auto& ts = edit->tempoSequence;
+        
+        beginTest ("Simple copy/paste");
+        {
+            ts.getTempo (0)->setBpm (120.0);
+            
+            // N.B. bars start at 0!
+            expectEquals (ts.barsBeatsToBeats ({ 0, 0.0 }), 0.0);
+            expectEquals (ts.barsBeatsToTime ({ 0, 0.0 }), 0.0);
+            expectEquals (ts.barsBeatsToBeats ({ 8, 0.0 }), 32.0);
+            expectEquals (ts.barsBeatsToTime ({ 8, 0.0 }), 16.0);
+
+            ts.insertTempo (ts.barsBeatsToBeats ({ 5, 0.0 }), 60.0, 1.0f);
+            ts.insertTempo (ts.barsBeatsToBeats ({ 9, 0.0 }), 120.0, 1.0f);
+
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 4, 0.0 })), 120.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 6, 0.0 })), 60.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 8, 0.0 })), 60.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 10, 0.0 })), 120.0, 1.0f);
+            
+            const Range<double> beatRangeToCopy (ts.barsBeatsToBeats ({ 6, 0.0 }), ts.barsBeatsToBeats ({ 8, 0.0 }));
+            const auto timeRangeToCopy = ts.beatsToTime (beatRangeToCopy);
+            const double numBeatsToInsert = beatRangeToCopy.getLength();
+
+            // Copy tempo changes
+            Clipboard::TempoChanges tempoChanges (ts, timeRangeToCopy);
+            
+            // Insert empty space
+            const double timeToInsertAt = ts.barsBeatsToTime ({ 2, 0.0 });
+            auto& tempoAtInsertionPoint = ts.getTempoAt (timeToInsertAt);
+
+            const auto beatRangeToInsert = Range<double>::withStartAndLength (ts.timeToBeats (timeToInsertAt), numBeatsToInsert);
+            const double lengthInTimeToInsert = ts.beatsToTime (beatRangeToInsert.getLength());
+            insertSpaceIntoEdit (*edit, EditTimeRange::withStartAndLength (timeToInsertAt, lengthInTimeToInsert));
+            
+            const double numBeatsInserted = beatRangeToInsert.getLength();
+            const int numBarsInserted = roundToInt (numBeatsInserted / tempoAtInsertionPoint.getMatchingTimeSig().denominator);
+            expectWithinAbsoluteError (numBeatsInserted, 8.0, 0.0001);
+            expectEquals (numBarsInserted, 2);
+
+            // Ensure tempos are correct at original region
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 4 + numBarsInserted, 0.0 })), 120.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 6 + numBarsInserted, 0.0 })), 60.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 8 + numBarsInserted, 0.0 })), 60.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 10 + numBarsInserted, 0.0 })), 120.0, 1.0f);
+            
+            // Paste tempo changes
+            tempoChanges.pasteTempoSequence (ts, EditTimeRange::withStartAndLength (timeToInsertAt, lengthInTimeToInsert));
+
+            // Ensure tempos are correct at inserted region
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 0, 0.0 })), 120.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 1, 3.0 })), 120.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 2, 0.0 })), 60.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 3, 3.0 })), 60.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 4, 0.0 })), 120.0, 1.0f);
+        }
+    }
+    
+    void runCopyTestsUsingBeatInsertion()
+    {
+        auto edit = Edit::createSingleTrackEdit (*Engine::getEngines()[0]);
+        auto& ts = edit->tempoSequence;
+        
+        beginTest ("Simple copy/paste");
+        {
+            ts.getTempo (0)->setBpm (120.0);
+            
+            // N.B. bars start at 0!
+            expectEquals (ts.barsBeatsToBeats ({ 0, 0.0 }), 0.0);
+            expectEquals (ts.barsBeatsToTime ({ 0, 0.0 }), 0.0);
+            expectEquals (ts.barsBeatsToBeats ({ 8, 0.0 }), 32.0);
+            expectEquals (ts.barsBeatsToTime ({ 8, 0.0 }), 16.0);
+
+            ts.insertTempo (ts.barsBeatsToBeats ({ 5, 0.0 }), 60.0, 1.0f);
+            ts.insertTempo (ts.barsBeatsToBeats ({ 9, 0.0 }), 120.0, 1.0f);
+
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 4, 0.0 })), 120.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 6, 0.0 })), 60.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 8, 0.0 })), 60.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 10, 0.0 })), 120.0, 1.0f);
+            
+            const Range<double> beatRangeToCopy (ts.barsBeatsToBeats ({ 6, 0.0 }), ts.barsBeatsToBeats ({ 8, 0.0 }));
+            const auto timeRangeToCopy = ts.beatsToTime (beatRangeToCopy);
+
+            // Copy tempo changes
+            Clipboard::TempoChanges tempoChanges (ts, timeRangeToCopy);
+            
+            // Insert empty space
+            const double timeToInsertAt = ts.barsBeatsToTime ({ 2, 0.0 });
+            auto& tempoAtInsertionPoint = ts.getTempoAt (timeToInsertAt);
+            const auto beatRangeToInsert = beatRangeToCopy.movedToStartAt (ts.timeToBeats (timeToInsertAt));
+            insertSpaceIntoEditFromBeatRange (*edit, beatRangeToInsert);
+            
+            const double numBeatsInserted = beatRangeToInsert.getLength();
+            const int numBarsInserted = roundToInt (numBeatsInserted / tempoAtInsertionPoint.getMatchingTimeSig().denominator);
+            expectWithinAbsoluteError (numBeatsInserted, 8.0, 0.0001);
+            expectEquals (numBarsInserted, 2);
+
+            // Ensure tempos are correct at original region
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 4 + numBarsInserted, 0.0 })), 120.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 6 + numBarsInserted, 0.0 })), 60.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 8 + numBarsInserted, 0.0 })), 60.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 10 + numBarsInserted, 0.0 })), 120.0, 1.0f);
+            
+            // Paste tempo changes
+            tempoChanges.pasteTempoSequence (ts, EditTimeRange (timeToInsertAt, ts.beatsToTime (beatRangeToInsert.getEnd())));
+
+            // Ensure tempos are correct at inserted region
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 0, 0.0 })), 120.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 1, 3.0 })), 120.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 2, 0.0 })), 60.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 3, 3.0 })), 60.0, 1.0f);
+            expectTempoSetting (ts.getTempoAtBeat (ts.barsBeatsToBeats ({ 4, 0.0 })), 120.0, 1.0f);
+        }
+    }
+};
+
+static ClipboardTempoTests clipboardTempoTests;
+
 
 //==============================================================================
 //==============================================================================

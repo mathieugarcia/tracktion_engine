@@ -15,7 +15,8 @@ namespace AppFunctions
 {
     UIBehaviour& getCurrentUIBehaviour()
     {
-        return Engine::getInstance().getUIBehaviour();
+        // TODO: RMR
+        return Engine::getEngines()[0]->getUIBehaviour();
     }
 
     Edit* getCurrentlyFocusedEdit()
@@ -394,7 +395,7 @@ namespace AppFunctions
     void stopRecordingAndDiscard()
     {
         if (auto transport = getActiveTransport())
-            transport->stop (true, true);
+            transport->stop (true, false);
     }
 
     void stopRecordingAndRestart()
@@ -443,7 +444,7 @@ namespace AppFunctions
 
     void insertTimeSigChange()
     {
-        if (auto sm = getCurrentUIBehaviour().getCurrentlyFocusedSelectionManager())
+        if (auto sm = getCurrentlyFocusedSelectionManagerWithValidEdit())
         {
             auto& edit = *sm->edit;
             auto& tempoSequence = edit.tempoSequence;

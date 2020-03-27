@@ -281,6 +281,14 @@ struct PhysicalMidiInputDeviceInstance  : public MidiInputDeviceInstanceBase
 
     bool startRecording() override
     {
+        // We need to keep a list of tracks the are being recorded to
+        // here, since user may un-arm track to stop recording
+        activeTracks.clear();
+
+        for (auto destTrack : getTargetTracks())
+            if (isRecordingActive (*destTrack))
+                activeTracks.add (destTrack);
+        
         if (getPhysicalMidiInput().inputDevice != nullptr)
         {
             getPhysicalMidiInput().masterTimeUpdate (startTime);
@@ -303,7 +311,7 @@ PhysicalMidiInputDevice::PhysicalMidiInputDevice (Engine& e, const String& name,
    : MidiInputDevice (e, TRANS("MIDI Input"), name),
      deviceIndex (deviceIndexToUse)
 {
-    controllerParser.reset (new MidiControllerParser());
+    controllerParser.reset (new MidiControllerParser (e));
     loadProps();
 }
 

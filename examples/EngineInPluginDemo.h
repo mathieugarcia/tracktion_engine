@@ -16,6 +16,8 @@
   exporters:        vs2017, xcode_mac, linux_make
 
   moduleFlags:      JUCE_STRICT_REFCOUNTEDPOINTER=1
+  defines:          JucePlugin_IsSynth=1, JucePlugin_WantsMidiInput=1,
+                    JucePlugin_Vst3Category="Instrument", JucePlugin_AUMainType='aumu', JucePlugin_VSTCategory=kPlugCategSynth
 
   type:             AudioProcessor
   mainClass:        EngineInPluginDemo
@@ -28,22 +30,10 @@
 
 #include "common/Utilities.h"
 
-static String organPatch = "<PLUGIN type=\"4osc\" windowLocked=\"1\" id=\"1069\" enabled=\"1\" filterType=\"1\" presetDirty=\"0\" presetName=\"4OSC: Organ\" filterFreq=\"127.00000000000000000000\" ampAttack=\"0.60000002384185791016\" ampDecay=\"10.00000000000000000000\" ampSustain=\"100.00000000000000000000\" ampRelease=\"0.40000000596046447754\" waveShape1=\"4\" tune2=\"-24.00000000000000000000\" waveShape2=\"4\"> <MACROPARAMETERS id=\"1069\"/> <MODIFIERASSIGNMENTS/> <MODMATRIX/> </PLUGIN>";
 
 //==============================================================================
-class PluginEditor : public AudioProcessorEditor
-{
-public:
-    PluginEditor (AudioProcessor& p) : AudioProcessorEditor (p)
-    {
-        setSize (400, 300);
-    }
-    
-    void paint (Graphics& g) override
-    {
-        g.fillAll (Colours::darkgrey);
-    }
-};
+//==============================================================================
+static String organPatch = "<PLUGIN type=\"4osc\" windowLocked=\"1\" id=\"1069\" enabled=\"1\" filterType=\"1\" presetDirty=\"0\" presetName=\"4OSC: Organ\" filterFreq=\"127.00000000000000000000\" ampAttack=\"0.60000002384185791016\" ampDecay=\"10.00000000000000000000\" ampSustain=\"100.00000000000000000000\" ampRelease=\"0.40000000596046447754\" waveShape1=\"4\" tune2=\"-24.00000000000000000000\" waveShape2=\"4\"> <MACROPARAMETERS id=\"1069\"/> <MODIFIERASSIGNMENTS/> <MODMATRIX/> </PLUGIN>";
 
 //==============================================================================
 class EngineInPluginDemo  : public AudioProcessor
@@ -52,30 +42,28 @@ public:
     //==============================================================================
     EngineInPluginDemo()
         : AudioProcessor (BusesProperties().withInput  ("Input",  AudioChannelSet::stereo())
-                                           .withOutput ("Output", AudioChannelSet::stereo())),
-        audioInterface (engine.getDeviceManager().getHostedAudioDeviceInterface())
-    {
-        audioInterface.initialise ({});
-        
-        setupInputs();
-        create4OSCPlugin();
-    }
-
-    ~EngineInPluginDemo()
+                                           .withOutput ("Output", AudioChannelSet::stereo()))
     {
     }
 
     //==============================================================================
     void prepareToPlay (double sampleRate, int expectedBlockSize) override
     {
+        // On Linux the plugin and prepareToPlay may not be called on the message thread.
+        // Engine needs to be created on the message thread so we'll do that now
+        ensureEngineCreatedOnMessageThread();
+        
         setLatencySamples (expectedBlockSize);
-        audioInterface.prepareToPlay (sampleRate, expectedBlockSize);
+        ensurePrepareToPlayCalledOnMessageThread (sampleRate, expectedBlockSize);
     }
 
     void releaseResources() override {}
 
     void processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi) override
     {
+        // Update position info first
+        engineWrapper->playheadSynchroniser.synchronise (*this);
+
         ScopedNoDenormals noDenormals;
         
         auto totalNumInputChannels  = getTotalNumInputChannels();
@@ -84,7 +72,7 @@ public:
         for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
             buffer.clear (i, 0, buffer.getNumSamples());
 
-        audioInterface.processBlock (buffer, midi);
+        engineWrapper->audioInterface.processBlock (buffer, midi);
     }
 
     //==============================================================================
@@ -121,9 +109,11 @@ public:
     }
 
 private:
-    void setupInputs()
+    //==============================================================================
+    static void setupInputs (te::Edit& edit)
     {
-        auto& dm = engine.getDeviceManager();
+        auto& dm = edit.engine.getDeviceManager();
+        
         for (int i = 0; i < dm.getNumMidiInDevices(); i++)
         {
             auto dev = dm.getMidiInDevice (i);
@@ -143,18 +133,14 @@ private:
         edit.restartPlayback();
     }
     
-    void create4OSCPlugin()
+    static void create4OSCPlugin (te::Edit& edit)
     {
-        //==============================================================================
         if (auto synth = dynamic_cast<te::FourOscPlugin*> (edit.getPluginCache().createNewPlugin (te::FourOscPlugin::xmlTypeName, {}).get()))
         {
-            XmlDocument doc (organPatch);
-            if (auto e = doc.getDocumentElement())
-            {
-                auto vt = ValueTree::fromXml (*e);
-                if (vt.isValid())
-                    synth->restorePluginStateFromValueTree (vt);
-            }
+            auto vt = ValueTree::fromXml (organPatch);
+            
+            if (vt.isValid())
+                synth->restorePluginStateFromValueTree (vt);
             
             if (auto t = EngineHelpers::getOrInsertAudioTrackAt (edit, 0))
                 t->pluginList.insertPlugin (*synth, 0, nullptr);
@@ -167,12 +153,123 @@ private:
     public:
         bool autoInitialiseDeviceManager() override { return false; }
     };
-    //==============================================================================
-    te::Engine engine { ProjectInfo::projectName, nullptr, std::make_unique<PluginEngineBehaviour>() };
-    te::Edit edit { engine, te::createEmptyEdit(), te::Edit::forEditing, nullptr, 0 };
-    te::TransportControl& transport { edit.getTransport() };
-    te::HostedAudioDeviceInterface& audioInterface;
     
+    //==============================================================================
+    struct EngineWrapper
+    {
+        EngineWrapper()
+            : audioInterface (engine.getDeviceManager().getHostedAudioDeviceInterface())
+        {
+            JUCE_ASSERT_MESSAGE_THREAD
+            audioInterface.initialise ({});
+
+            setupInputs (edit);
+            create4OSCPlugin (edit);
+        }
+
+        te::Engine engine { ProjectInfo::projectName, nullptr, std::make_unique<PluginEngineBehaviour>() };
+        te::Edit edit { engine, te::createEmptyEdit (engine), te::Edit::forEditing, nullptr, 0 };
+        te::TransportControl& transport { edit.getTransport() };
+        te::HostedAudioDeviceInterface& audioInterface;
+        te::ExternalPlayheadSynchroniser playheadSynchroniser { edit };
+    };
+    
+    template<typename Function>
+    void callFunctionOnMessageThread (Function&& func)
+    {
+        if (MessageManager::getInstance()->isThisTheMessageThread())
+        {
+            func();
+        }
+        else
+        {
+            jassert (! MessageManager::getInstance()->currentThreadHasLockedMessageManager());
+            WaitableEvent finishedSignal;
+            MessageManager::callAsync ([&]
+                                       {
+                                           func();
+                                           finishedSignal.signal();
+                                       });
+            finishedSignal.wait (-1);
+        }
+    }
+    
+    void ensureEngineCreatedOnMessageThread()
+    {
+        if (! engineWrapper)
+            callFunctionOnMessageThread ([&] { engineWrapper = std::make_unique<EngineWrapper>(); });
+    }
+    
+    void ensurePrepareToPlayCalledOnMessageThread (double sampleRate, int expectedBlockSize)
+    {
+        jassert (engineWrapper);
+        callFunctionOnMessageThread ([&] { engineWrapper->audioInterface.prepareToPlay (sampleRate, expectedBlockSize); });
+    }
+    
+    //==============================================================================
+    std::unique_ptr<EngineWrapper> engineWrapper;
+
+    //==============================================================================
+    //==============================================================================
+    class PluginEditor : public AudioProcessorEditor
+    {
+    public:
+        PluginEditor (EngineInPluginDemo& p)
+            : AudioProcessorEditor (p),
+              plugin (p)
+        {
+            addAndMakeVisible (clickTrackButton);
+
+            pluginPositionInfo.resetToDefault();
+            editPositionInfo.resetToDefault();
+            
+            repaintTimer.startTimerHz (25);
+            update();
+
+            setSize (400, 300);
+        }
+        
+        void paint (Graphics& g) override
+        {
+            g.fillAll (Colours::darkgrey);
+            
+            auto r = getLocalBounds();
+            String text;
+            text << "Host Info:" << newLine
+                 << PlayHeadHelpers::getTimecodeDisplay (pluginPositionInfo) << newLine
+                 << newLine
+                 << "Tracktion Engine Info:" << newLine
+                 << PlayHeadHelpers::getTimecodeDisplay (editPositionInfo) << newLine;
+            g.setColour (Colours::white);
+            g.setFont (15.0f);
+            g.drawFittedText (text, r.reduced (10), Justification::topLeft, 5);
+        }
+        
+        void resized() override
+        {
+            auto r = getLocalBounds();
+            clickTrackButton.setBounds (r.reduced (10).removeFromBottom (26));
+        }
+        
+    private:
+        EngineInPluginDemo& plugin;
+        AudioPlayHead::CurrentPositionInfo pluginPositionInfo, editPositionInfo;
+        te::LambdaTimer repaintTimer { [this] { update(); } };
+        ToggleButton clickTrackButton { "Enable Click Track" };
+        
+        void update()
+        {
+            if (plugin.engineWrapper)
+            {
+                pluginPositionInfo = plugin.engineWrapper->playheadSynchroniser.getPositionInfo();
+                editPositionInfo = getCurrentPositionInfo (plugin.engineWrapper->edit);
+                clickTrackButton.getToggleStateValue().referTo (plugin.engineWrapper->edit.clickTrackEnabled.getPropertyAsValue());
+            }
+            
+            repaint();
+        }
+    };
+
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EngineInPluginDemo)
 };

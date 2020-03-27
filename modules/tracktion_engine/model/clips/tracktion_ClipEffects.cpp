@@ -27,7 +27,7 @@ static inline juce::int64 hashValueTree (juce::int64 startHash, const ValueTree&
 static inline juce::int64 hashPlugin (const ValueTree& effectState, Plugin& plugin)
 {
     CRASH_TRACER
-    juce::int64 h = (effectState.getParent().indexOf (effectState) + 1) * 6356;
+    juce::int64 h = String (effectState.getParent().indexOf (effectState) + 1).hashCode64();
 
     for (int param = plugin.getNumAutomatableParameters(); --param >= 0;)
     {
@@ -37,14 +37,15 @@ static inline juce::int64 hashPlugin (const ValueTree& effectState, Plugin& plug
 
             if (ac.getNumPoints() == 0)
             {
-                h ^= (juce::int64) (ap->getCurrentValue() * 635);
+                h = (String (h) + String (ap->getCurrentValue())).hashCode64();
             }
             else
             {
                 for (int i = 0; i < ac.getNumPoints(); ++i)
                 {
                     const auto p = ac.getPoint (i);
-                    h ^= (juce::int64) (p.time * 63542) ^ (juce::int64) (p.value * 72634) ^ (juce::int64) (p.curve * 82635);
+                    auto pointH = String (p.time) + String (p.value) + String (p.curve);
+                    h = (String (h) + pointH).hashCode64();
                 }
             }
         }
@@ -206,7 +207,7 @@ struct ClipEffect::ClipEffectRenderJob  : public ReferenceCountedObject
 
 //==============================================================================
 ClipEffect::ClipEffect (const ValueTree& v, ClipEffects& o)
-    : edit (o.clip.edit), state (v), clipEffects (o)
+    : edit (o.clip.edit), state (v), clipEffects (o), destinationFile (edit.engine)
 {
     state.addListener (this);
 }
@@ -320,7 +321,7 @@ AudioFile ClipEffect::getSourceFile() const
     if (auto ce = clipEffects.getClipEffect (state.getSibling (-1)))
         return ce->getDestinationFile();
 
-    return AudioFile (clipEffects.clip.getOriginalFile());
+    return AudioFile (clipEffects.clip.edit.engine, clipEffects.clip.getOriginalFile());
 }
 
 AudioFile ClipEffect::getDestinationFile() const
@@ -353,7 +354,7 @@ void ClipEffect::valueTreeChanged()
 
 void ClipEffect::invalidateDestination()
 {
-    destinationFile = AudioFile();
+    destinationFile = AudioFile (edit.engine);
     sourceChanged();
 }
 
@@ -391,6 +392,7 @@ struct AudioNodeRenderJob  : public ClipEffect::ClipEffectRenderJob
         if (ok)
         {
             ok = destination.deleteFile();
+            (void) ok;
             jassert (ok);
             ok = renderContext->writer->file.getFile().moveFileTo (destination.getFile());
             jassert (ok);
@@ -415,19 +417,19 @@ struct AudioNodeRenderJob  : public ClipEffect::ClipEffectRenderJob
             auto sourceInfo = source.getInfo();
             jassert (sourceInfo.numChannels > 0 && sourceInfo.sampleRate > 0.0 && sourceInfo.bitsPerSample > 0);
 
-            AudioFile tempFile (destination.getFile().getSiblingFile ("temp_effect_" + String::toHexString (Random::getSystemRandom().nextInt64()))
+            AudioFile tempFile (*destination.engine, destination.getFile().getSiblingFile ("temp_effect_" + String::toHexString (Random::getSystemRandom().nextInt64()))
                                 .withFileExtension (destination.getFile().getFileExtension()));
 
             // need to strip AIFF metadata to write to wav files
             if (sourceInfo.metadata.getValue ("MetaDataSource", "None") == "AIFF")
                 sourceInfo.metadata.clear();
 
-            writer.reset (new AudioFileWriter (tempFile, Engine::getInstance().getAudioFileFormatManager().getWavFormat(),
+            writer.reset (new AudioFileWriter (tempFile, destination.engine->getAudioFileFormatManager().getWavFormat(),
                                                sourceInfo.numChannels, sourceInfo.sampleRate,
                                                jmax (16, sourceInfo.bitsPerSample),
                                                sourceInfo.metadata, 0));
 
-            renderingBuffer.reset (new juce::AudioBuffer<float> (writer->writer->getNumChannels(), blockSize + 256));
+            renderingBuffer.reset (new juce::AudioBuffer<float> (writer->getNumChannels(), blockSize + 256));
             auto renderingBufferChannels = AudioChannelSet::canonicalChannelSet (renderingBuffer->getNumChannels());
 
             // now prepare the render context
@@ -440,7 +442,7 @@ struct AudioNodeRenderJob  : public ClipEffect::ClipEffectRenderJob
             // round pre roll timr to nearest block
             numPreBlocks = (int) std::ceil ((prerollTimeS * sourceInfo.sampleRate) / blockSize);
 
-            auto prerollTimeRounded = numPreBlocks * blockSizeToUse / writer->writer->getSampleRate();
+            auto prerollTimeRounded = numPreBlocks * blockSizeToUse / writer->getSampleRate();
 
             streamTime = -prerollTimeRounded;
 
@@ -453,8 +455,8 @@ struct AudioNodeRenderJob  : public ClipEffect::ClipEffectRenderJob
         ThreadPoolJob::JobStatus render (AudioNode& audioNode, std::atomic<float>& progressToUpdate)
         {
             CRASH_TRACER
-            auto blockLength = blockSize / writer->writer->getSampleRate();
-            juce::int64 samplesToWrite = roundToInt ((streamRange.getEnd() - streamTime) * writer->writer->getSampleRate());
+            auto blockLength = blockSize / writer->getSampleRate();
+            juce::int64 samplesToWrite = roundToInt ((streamRange.getEnd() - streamTime) * writer->getSampleRate());
             auto blockEnd = jmin (streamTime + blockLength, streamRange.getEnd());
             rc->streamTime = { streamTime, blockEnd };
 
@@ -535,7 +537,7 @@ struct AudioNodeRenderJob  : public ClipEffect::ClipEffectRenderJob
             PlaybackInitialisationInfo info =
             {
                 0.0,
-                renderContext->writer->writer->getSampleRate(),
+                renderContext->writer->getSampleRate(),
                 renderContext->blockSize,
                 &allNodes,
                 renderContext->rc->playhead
@@ -566,7 +568,7 @@ struct BlockBasedRenderJob : public ClipEffect::ClipEffectRenderJob
         if (sourceInfo.metadata.getValue ("MetaDataSource", "None") == "AIFF")
             sourceInfo.metadata.clear();
 
-        reader.reset (AudioFileUtils::createReaderFor (source.getFile()));
+        reader.reset (AudioFileUtils::createReaderFor (engine, source.getFile()));
 
         if (reader == nullptr || reader->lengthInSamples == 0)
             return false;
@@ -1121,7 +1123,7 @@ WarpTimeEffect::WarpTimeEffect (const ValueTree& v, ClipEffects& o)
     : ClipEffect (v, o)
 {
     CRASH_TRACER
-    warpTimeManager = new WarpTimeManager (edit, {}, state);
+    warpTimeManager = new WarpTimeManager (edit, AudioFile (edit.engine), state);
     editLoadedCallback = std::make_unique<Edit::LoadFinishedCallback<WarpTimeEffect>> (*this, edit);
 }
 
@@ -1459,7 +1461,7 @@ struct MakeMonoEffect::MakeMonoRenderJob : public BlockBasedRenderJob
         if (sourceInfo.metadata.getValue ("MetaDataSource", "None") == "AIFF")
             sourceInfo.metadata.clear();
 
-        reader.reset (AudioFileUtils::createReaderFor (source.getFile()));
+        reader.reset (AudioFileUtils::createReaderFor (engine, source.getFile()));
 
         if (reader == nullptr || reader->lengthInSamples == 0)
             return false;

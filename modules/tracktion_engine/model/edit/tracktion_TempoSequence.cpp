@@ -364,7 +364,7 @@ void TempoSequence::moveTempoStart (int index, double deltaBeats, bool snapToBea
             const double nextBeat = (next != 0) ? next->startBeatNumber : 0x7ffffff;
 
             const double newStart = jlimit (prevBeat, nextBeat, t->startBeatNumber + deltaBeats);
-            t->set (snapToBeat ? roundToInt (newStart) : newStart, t->bpm, t->curve, true);
+            t->set (snapToBeat ? roundToInt (newStart) : newStart, t->bpm, t->curve, false);
         }
     }
 }
@@ -409,6 +409,34 @@ void TempoSequence::insertSpaceIntoSequence (double time, double amountOfSpaceIn
 
         for (int i = getNumTempos(); --i >= endIndex;)
             moveTempoStart (i, beatsToInsert, snapToBeat);
+    }
+}
+
+void TempoSequence::deleteRegion (EditTimeRange range)
+{
+    const auto beatRange = timeToBeats (range);
+    
+    removeTemposBetween (range, false);
+    removeTimeSigsBetween (range);
+
+    const bool snapToBeat = false;
+    const double startTime = beatsToTime (beatRange.getStart());
+    const double deltaBeats = -beatRange.getLength();
+
+    // Move timesig settings
+    {
+        const int startIndex = indexOfTimeSigAt (startTime) + 1;
+
+        for (int i = startIndex; i < getNumTimeSigs(); ++i)
+            moveTimeSigStart (i, deltaBeats, snapToBeat);
+    }
+
+    // Move tempo settings
+    {
+        const int startIndex = indexOfNextTempoAt (startTime);
+
+        for (int i = startIndex; i < getNumTempos(); ++i)
+            moveTempoStart (i, deltaBeats, snapToBeat);
     }
 }
 
@@ -1201,7 +1229,7 @@ private:
 
     void runPositionTests()
     {
-        auto edit = Edit::createSingleTrackEdit (Engine::getInstance());
+        auto edit = Edit::createSingleTrackEdit (*Engine::getEngines().getFirst());
 
         beginTest ("Defaults");
         {
@@ -1285,7 +1313,7 @@ private:
 
     void runModificationTests()
     {
-        auto edit = Edit::createSingleTrackEdit (Engine::getInstance());
+        auto edit = Edit::createSingleTrackEdit (*Engine::getEngines()[0]);
         auto& ts = edit->tempoSequence;
 
         beginTest ("Insertions");
