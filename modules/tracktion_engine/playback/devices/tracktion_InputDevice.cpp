@@ -334,7 +334,7 @@ void InputDeviceInstance::setRecordingEnabled (const Track& t, bool b)
         return;
     }
 
-s    for (auto dest : destTracks)
+    for (auto dest : destTracks)
         if (dest->targetTrack == t.itemID)
             dest->recordEnabled = b;
 }
