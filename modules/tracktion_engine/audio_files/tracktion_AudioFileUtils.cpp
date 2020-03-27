@@ -26,7 +26,7 @@ juce::AudioFormatReader* AudioFileUtils::createReaderFindingFormat (Engine& engi
         {
             if (auto in = file.createInputStream())
             {
-                if (auto r = af->createReaderFor (in.release(), true))
+                if (auto r = af->createReaderFor (in, true))
                 {
                     format = af;
                     return r;

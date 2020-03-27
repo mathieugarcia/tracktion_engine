@@ -287,7 +287,7 @@ juce::MemoryMappedAudioFormatReader* FloatAudioFormat::createMemoryMappedReader 
 {
     if (auto fin = file.createInputStream())
     {
-        FloatAudioFormatReader reader (fin.release());
+        FloatAudioFormatReader reader (fin);
 
         if (reader.lengthInSamples > 0)
             return new MemoryMappedFloatReader (file, reader);
