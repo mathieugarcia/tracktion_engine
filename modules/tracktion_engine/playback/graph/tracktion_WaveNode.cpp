@@ -1,6 +1,6 @@
 /*
     ,--.                     ,--.     ,--.  ,--.
-  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2018
+  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2024
   '-.  .-'|  .--' ,-.  | .--'|     /'-.  .-',--.| .-. ||      \   Tracktion Software
     |  |  |  |  \ '-'  \ `--.|  \  \  |  |  |  |' '-' '|  ||  |       Corporation
     `---' `--'   `--`--'`---'`--'`--' `---' `--' `---' `--''--'    www.tracktion.com
@@ -8,9 +8,15 @@
     Tracktion Engine uses a GPL/commercial licence - see LICENCE.md for details.
 */
 
+#ifndef REPLACE_ELASTIQUE_WITH_DIRECT_MODE
+ #define REPLACE_ELASTIQUE_WITH_DIRECT_MODE 1
+#endif
+
 namespace tracktion { inline namespace engine
 {
 
+//==============================================================================
+//==============================================================================
 namespace utils
 {
     inline void zeroSamplesOutsideClipRange (choc::buffer::ChannelArrayView<float> buffer,
@@ -45,6 +51,22 @@ namespace utils
               buffer.getEnd (numSamplesToClearAtEnd).clear();
         }
     }
+
+    inline TimeStretcher::Mode replaceElastiqueWithDirectMode (TimeStretcher::Mode m)
+    {
+       #if REPLACE_ELASTIQUE_WITH_DIRECT_MODE
+        if (m == TimeStretcher::elastiquePro)           return TimeStretcher::elastiqueDirectPro;
+        if (m == TimeStretcher::elastiqueEfficient)     return TimeStretcher::elastiqueDirectEfficient;
+        if (m == TimeStretcher::elastiqueMobile)        return TimeStretcher::elastiqueDirectMobile;
+       #endif
+
+        return m;
+    }
+
+    inline TimeStretcher::Mode replaceElastiqueWithDirectModeIfNotRendering (TimeStretcher::Mode m, bool isRendering)
+    {
+        return isRendering ? m: replaceElastiqueWithDirectMode (m);
+    }
 }
 
 //==============================================================================
@@ -55,7 +77,7 @@ public:
     AudioFileCacheReader (AudioFileCache::Reader::Ptr ptr, TimeDuration timeout,
                           const juce::AudioChannelSet& destBufferChannels,
                           const juce::AudioChannelSet& sourceBufferChannels)
-        : reader (ptr), timeoutMs ((int) std::lround (timeout.inSeconds() * 1000.0)),
+        : reader (std::move (ptr)), timeoutMs ((int) std::lround (timeout.inSeconds() * 1000.0)),
           destChannelSet (destBufferChannels), sourceChannelSet (sourceBufferChannels)
     {
     }
@@ -242,9 +264,24 @@ public:
     {
         for (int i = (int) source->getNumChannels(); --i >= 0;)
         {
-            resamplers.emplace_back (juce::LagrangeInterpolator());
+            resamplers.emplace_back();
             resamplers.back().reset();
         }
+    }
+
+    void reset() override
+    {
+        for (auto& r : resamplers)
+            r.reset();
+
+        hasBeenReset = true;
+        timeSourceIsAheadDueToLatency = {};
+    }
+
+    SampleCount getPosition() override
+    {
+        const auto sourcePosition = TimePosition::fromSamples (source->getPosition(), source->getSampleRate());
+        return toSamples (sourcePosition - timeSourceIsAheadDueToLatency, destSampleRate);
     }
 
     void setPosition (SampleCount t) override
@@ -254,7 +291,7 @@ public:
 
     void setPosition (TimePosition t) override
     {
-        source->setPosition (t);
+        source->setPosition (t + timeSourceIsAheadDueToLatency);
     }
 
     /** Sets a ratio to increase or decrease playback speed. */
@@ -278,28 +315,71 @@ public:
 
     bool readSamples (choc::buffer::ChannelArrayView<float>& destBuffer) override
     {
+        using namespace choc::buffer;
         const auto numChannels = destBuffer.getNumChannels();
-        assert (numChannels <= (choc::buffer::ChannelCount) resamplers.size());
+        assert (numChannels <= (ChannelCount) resamplers.size());
         assert (destBuffer.getNumChannels() == numChannels);
 
         const auto ratio = sampleRatio * speedRatio;
-        const auto numFrames = destBuffer.getNumFrames();
-        const int numSourceFramesToRead = static_cast<int> ((numFrames * ratio) + 0.5);
+        const auto numDestFrames = destBuffer.getNumFrames();
+        const int numSourceFramesToRead = static_cast<int> ((numDestFrames * ratio) + 0.5);
+
+        if (std::exchange (hasBeenReset, false))
+        {
+            constexpr auto baseLatencyNumSamples = static_cast<FrameCount> (juce::LagrangeInterpolator::getBaseLatency());
+            timeSourceIsAheadDueToLatency = TimeDuration::fromSamples (baseLatencyNumSamples, destSampleRate);
+            const auto modifiedNumSourceFramesToRead = numSourceFramesToRead + static_cast<int> (baseLatencyNumSamples);
+            const auto numFramesToDrop = static_cast<FrameCount> (std::lround (baseLatencyNumSamples / ratio));
+            const auto modifiedNumDestFrames = numDestFrames + numFramesToDrop;
+
+            AudioScratchBuffer destDataScratch ((int) numChannels, static_cast<int> (modifiedNumDestFrames));
+            auto destScratchView = toBufferView (destDataScratch.buffer);
+            destScratchView.clear();
+
+            if (! readResampling (destScratchView, *source, modifiedNumSourceFramesToRead,
+                                  resamplers, std::to_array (gains)))
+                return false;
+
+            copy (destBuffer, destScratchView.fromFrame (numFramesToDrop));
+            return true;
+        }
+
+        return readResampling (destBuffer, *source, numSourceFramesToRead,
+                               resamplers, std::to_array (gains));
+    }
+
+    const double destSampleRate;
+    const double sourceSampleRate { source->getSampleRate() };
+    const double sampleRatio { sourceSampleRate / destSampleRate  };
+    double speedRatio = 1.0;
+    std::vector<juce::LagrangeInterpolator> resamplers;
+    float gains[2] = { 1.0f, 1.0f };
+    TimeDuration timeSourceIsAheadDueToLatency;
+    bool hasBeenReset = true;
+
+    static bool readResampling (choc::buffer::ChannelArrayView<float> destBuffer,
+                                AudioReader& sourceReader, int numSourceFramesToRead,
+                                std::vector<juce::LagrangeInterpolator>& resamplers_,
+                                const std::array<float, 2> gains)
+    {
+        const auto numChannels = destBuffer.getNumChannels();
+        const auto numDestFrames = destBuffer.getNumFrames();
+
         AudioScratchBuffer fileData ((int) numChannels, numSourceFramesToRead);
         auto fileDataView = toBufferView (fileData.buffer);
-        const bool ok = source->readSamples (fileDataView);
+        const bool ok = sourceReader.readSamples (fileDataView);
 
-        const auto resamplerRatio = static_cast<double> (numSourceFramesToRead) / numFrames;
+        const auto resamplerRatio = static_cast<double> (numSourceFramesToRead) / numDestFrames;
 
         for (choc::buffer::ChannelCount channel = 0; channel < numChannels; ++channel)
         {
-            if (channel < (choc::buffer::ChannelCount) resamplers.size())
+            if (channel < (choc::buffer::ChannelCount) resamplers_.size())
             {
                 const auto src = fileData.buffer.getReadPointer ((int) channel);
-                const auto dest = destBuffer.getIterator (channel).sample;
+                const auto dest = destBuffer.getChannel (channel).data.data;
 
-                auto& resampler = resamplers[(size_t) channel];
-                resampler.processAdding (resamplerRatio, src, dest, (int) numFrames, gains[channel & 1]);
+                auto& resampler = resamplers_[(size_t) channel];
+                resampler.processAdding (resamplerRatio, src, dest, (int) numDestFrames, gains[channel & 1]);
             }
             else
             {
@@ -309,13 +389,6 @@ public:
 
         return ok;
     }
-
-    const double destSampleRate;
-    const double sourceSampleRate { source->getSampleRate() };
-    const double sampleRatio { sourceSampleRate / destSampleRate  };
-    double speedRatio = 1.0;
-    std::vector<juce::LagrangeInterpolator> resamplers;
-    float gains[2] = { 1.0f, 1.0f };
 };
 
 
@@ -337,7 +410,7 @@ public:
                     case ResamplingQuality::sincBest:   return src::SRC_SINC_BEST_QUALITY;
                     case ResamplingQuality::lagrange:   [[ fallthrough ]];
                     default: assert (false); return src::SRC_SINC_FASTEST;
-                };
+                }
             }();
 
         int error = 0;
@@ -427,7 +500,7 @@ public:
         return true;
     }
 
-    static constexpr choc::buffer::FrameCount chunkSize = 1024;
+    static constexpr choc::buffer::FrameCount chunkSize = 256;
     const int numChannels;
     const double destSampleRate;
     const double sourceSampleRate { source->getSampleRate() };
@@ -500,15 +573,30 @@ public:
     }
 };
 
+class TimeStretchReaderBase : public SingleInputAudioReader
 
-class TimeStretchReader final   : public SingleInputAudioReader
 {
 public:
-    TimeStretchReader (std::unique_ptr<AudioReader> input)
-        : SingleInputAudioReader (std::move (input)), numChannels ((int) source->getNumChannels())
+    TimeStretchReaderBase (std::unique_ptr<AudioReader> input)
+        : SingleInputAudioReader (std::move (input))
+    {
+    }
+
+    virtual ~TimeStretchReaderBase() = default;
+    virtual void setSpeed (double speedRatio) = 0;
+    virtual void setPitch (double semitones) = 0;
+};
+
+class TimeStretchReader final   : public TimeStretchReaderBase
+{
+public:
+    TimeStretchReader (std::unique_ptr<AudioReader> input,
+                       TimeStretcher::Mode mode,
+                       TimeStretcher::ElastiqueProOptions elastiqueProOptions)
+        : TimeStretchReaderBase (std::move (input)), numChannels ((int) source->getNumChannels())
     {
         timeStretcher.initialise (source->getSampleRate(), chunkSize, numChannels,
-                                  TimeStretcher::defaultMode, {}, false);
+                                  mode, elastiqueProOptions, true);
         inputFifo.setSize (numChannels, timeStretcher.getMaxFramesNeeded());
         outputFifo.setSize (numChannels, timeStretcher.getMaxFramesNeeded());
 
@@ -547,7 +635,7 @@ public:
     {
     }
 
-    void setSpeed (double speedRatio)
+    void setSpeed (double speedRatio) override
     {
         if (playbackSpeedRatio == speedRatio)
             return;
@@ -556,7 +644,7 @@ public:
         setSpeedAndPitch (playbackSpeedRatio, semitonesShift);
     }
 
-    void setPitch (double semitones)
+    void setPitch (double semitones) override
     {
         if (semitonesShift == semitones)
             return;
@@ -569,6 +657,7 @@ public:
     {
         playbackSpeedRatio = speedRatio;
         semitonesShift = semitones;
+
         [[ maybe_unused ]] const bool ok = timeStretcher.setSpeedAndPitch ((float) (1.0 / speedRatio), (float) semitonesShift);
         assert (ok);
     }
@@ -615,7 +704,7 @@ public:
         return true;
     }
 
-    static constexpr int chunkSize = 1024;
+    static constexpr int chunkSize = 256;
     const int numChannels;
     TimeStretcher timeStretcher;
     AudioFifo inputFifo { numChannels, chunkSize }, outputFifo { numChannels, chunkSize };
@@ -624,6 +713,144 @@ public:
     SampleCount getReadPosition() const
     {
         return static_cast<SampleCount> (readPosition + 0.5);
+    }
+};
+
+class ReadAheadTimeStretchReader final  : public TimeStretchReaderBase
+{
+public:
+    ReadAheadTimeStretchReader (std::unique_ptr<AudioReader> input,
+                                TimeStretcher::Mode mode,
+                                TimeStretcher::ElastiqueProOptions elastiqueProOptions,
+                                int blockSize)
+        : TimeStretchReaderBase (std::move (input)), numChannels ((int) source->getNumChannels()),
+          chunkSize (std::min (blockSize, 1024)) // Elastique can only support up to 1024
+    {
+        timeStretcher.initialise (source->getSampleRate(), chunkSize, numChannels,
+                                  mode, elastiqueProOptions, true);
+
+        source->setPosition (getReadPosition());
+        timeStretcher.reset();
+        setSpeedAndPitch (playbackSpeedRatio, semitonesShift);
+    }
+
+    SampleCount getPosition() override
+    {
+        return getReadPosition();
+    }
+
+    void setPosition (SampleCount t) override
+    {
+        if (std::abs (t - getReadPosition()) <= 10)
+            return;
+
+        readPosition = (double) t;
+
+        source->setPosition (t);
+        timeStretcher.reset();
+        setSpeedAndPitch (playbackSpeedRatio, semitonesShift);
+    }
+
+    void setPosition (TimePosition t) override
+    {
+        setPosition (toSamples (t, getSampleRate()));
+    }
+
+    void reset() override
+    {
+    }
+
+    void setSpeed (double speedRatio) override
+    {
+        if (playbackSpeedRatio == speedRatio)
+            return;
+
+        playbackSpeedRatio = speedRatio;
+        setSpeedAndPitch (playbackSpeedRatio, semitonesShift);
+    }
+
+    void setPitch (double semitones) override
+    {
+        if (semitonesShift == semitones)
+            return;
+
+        semitonesShift = semitones;
+        setSpeedAndPitch (playbackSpeedRatio, semitonesShift);
+    }
+
+    void setSpeedAndPitch (double speedRatio, double semitones)
+    {
+        playbackSpeedRatio = speedRatio;
+        semitonesShift = semitones;
+
+        [[ maybe_unused ]] const bool ok = timeStretcher.setSpeedAndPitch ((float) (1.0 / speedRatio), (float) semitonesShift);
+        assert (ok);
+    }
+
+    bool readSamples (choc::buffer::ChannelArrayView<float>& destBuffer) override
+    {
+        assert (numChannels == (int) destBuffer.getNumChannels());
+        const auto numFramesToDo = static_cast<int> (destBuffer.getNumFrames());
+        int startFrame = 0;
+
+        // Always push one block to keep the input fifo stoked but don't do this for every chunk unless required
+        if (const auto numToPush = timeStretcher.getFramesRecomended(); numToPush > 0)
+            if (! readSourceAndPushFrames (numToPush))
+                return false;
+
+        for (auto numFramesLeft = numFramesToDo; numFramesLeft > 0;)
+        {
+            const auto maxNumFramesThisTime = std::min (chunkSize, numFramesLeft);
+
+            // Read the number of samples we need
+            {
+                auto destAudioBuffer = toAudioBuffer (destBuffer.getFrameRange (createFrameRange (startFrame, startFrame + maxNumFramesThisTime)));
+                const int numRead = timeStretcher.popData (destAudioBuffer.getArrayOfWritePointers(), maxNumFramesThisTime);
+
+                if (numRead == 0)
+                {
+                    destBuffer.clear();
+                    return false;
+                }
+
+                startFrame += numRead;
+                numFramesLeft -= numRead;
+            }
+
+            if (numFramesLeft > 0 && timeStretcher.requiresMoreFrames())
+                if (const auto numToPush = timeStretcher.getFramesRecomended(); numToPush > 0)
+                    if (! readSourceAndPushFrames (numToPush))
+                        return false;
+        }
+
+        readPosition += numFramesToDo * playbackSpeedRatio;
+
+        return true;
+    }
+
+    const int numChannels, chunkSize = 1024;
+    ReadAheadTimeStretcher timeStretcher { 3 };
+    double playbackSpeedRatio = 1.0, semitonesShift = 0.0, readPosition = 0.0;
+
+    SampleCount getReadPosition() const
+    {
+        return static_cast<SampleCount> (readPosition + 0.5);
+    }
+
+    bool readSourceAndPushFrames (int numSourceFrames)
+    {
+        if (numSourceFrames <= 0)
+            return true;
+
+        // Read samples from source and push to stretcher if capacity
+        AudioScratchBuffer scratchBuffer (numChannels, numSourceFrames);
+        scratchBuffer.buffer.clear();
+        auto scratchView = toBufferView (scratchBuffer.buffer);
+
+        if (! source->readSamples (scratchView))
+            return false;
+
+        return timeStretcher.pushData (scratchBuffer.buffer.getArrayOfReadPointers(), numSourceFrames) == numSourceFrames;
     }
 };
 
@@ -688,9 +915,11 @@ class WarpReader final  : public SingleInputAudioReader
 {
 public:
     WarpReader (std::unique_ptr<AudioReader> input,
-                WarpMap warpMap)
-        : SingleInputAudioReader (std::make_unique<TimeStretchReader> (std::move (input))),
-          reader (static_cast<TimeStretchReader*> (source.get())), map (warpMap)
+                WarpMap warpMap,
+                TimeStretcher::Mode mode,
+                TimeStretcher::ElastiqueProOptions options)
+        : SingleInputAudioReader (std::make_unique<TimeStretchReader> (std::move (input), mode, options)),
+          reader (static_cast<TimeStretchReader*> (source.get())), map (std::move (warpMap))
     {
     }
 
@@ -745,7 +974,7 @@ class PitchAdjustReader final   : public SingleInputAudioReader
 {
 public:
     PitchAdjustReader (std::unique_ptr<AudioReader> input,
-                       TimeStretchReader* timeStretcher,
+                       TimeStretchReaderBase* timeStretcher,
                        const tempo::Sequence& fileTempoSequence)
         : SingleInputAudioReader (std::move (input)),
           timeStretchSource (timeStretcher),
@@ -756,7 +985,7 @@ public:
     }
 
     PitchAdjustReader (std::unique_ptr<AudioReader> input,
-                       TimeStretchReader* timeStretcher,
+                       TimeStretchReaderBase* timeStretcher,
                        float numSemitones)
         : SingleInputAudioReader (std::move (input)),
           timeStretchSource (timeStretcher),
@@ -790,7 +1019,7 @@ public:
         return SingleInputAudioReader::readSamples (destBuffer);
     }
 
-    TimeStretchReader* timeStretchSource;
+    TimeStretchReaderBase* timeStretchSource;
     const int rootPitch = 60;
     tempo::Key key;
 
@@ -809,14 +1038,14 @@ public:
     {
     }
 
-    TimeRangeReader (std::unique_ptr<TimeStretchReader> input)
+    TimeRangeReader (std::unique_ptr<TimeStretchReaderBase> input)
         : SingleInputAudioReader (std::move (input)),
-          timeStretchSource (static_cast<TimeStretchReader*> (source.get()))
+          timeStretchSource (static_cast<TimeStretchReaderBase*> (source.get()))
     {
     }
 
     TimeRangeReader (std::unique_ptr<AudioReader> input,
-                     TimeStretchReader* timeStretcher)
+                     TimeStretchReaderBase* timeStretcher)
         : SingleInputAudioReader (std::move (input)),
           timeStretchSource (timeStretcher)
     {
@@ -853,7 +1082,7 @@ public:
     }
 
     ResamplerReader* resamplerReader = nullptr;
-    TimeStretchReader* timeStretchSource = nullptr;
+    TimeStretchReaderBase* timeStretchSource = nullptr;
 };
 
 
@@ -956,9 +1185,9 @@ public:
                double playbackSpeedRatio)
     {
         // Apply offset first
-        br = br + offset - *dynamicOffset;
+        const auto beatRangeToRead = br + offset - *dynamicOffset;
 
-        return readLoopedBeatRange (br, destBuffer, editDuration, isContiguous, playbackSpeedRatio);
+        return readLoopedBeatRange (beatRangeToRead, destBuffer, editDuration, isContiguous, playbackSpeedRatio);
     }
 
     choc::buffer::ChannelCount getNumChannels() override    { return source->getNumChannels(); }
@@ -1164,7 +1393,7 @@ public:
                double playbackSpeedRatio)
     {
         if (! shouldWarp() || editTimeRange.isEmpty())
-            return  reader->read (editBeatRange, editTimeRange, destBuffer, isContiguous, playbackSpeedRatio);
+            return reader->read (editBeatRange, editTimeRange, destBuffer, isContiguous, playbackSpeedRatio);
 
         const auto originalDuration = editTimeRange.getLength();
         std::tie (editBeatRange, editTimeRange) = warpTimeRanges (editBeatRange, editTimeRange);
@@ -1481,7 +1710,7 @@ void WaveNode::processSection (ProcessContext& pc, juce::Range<int64_t> timeline
     }
     else
     {
-        lastSampleFadeLength = 40u;
+        lastSampleFadeLength = std::min (numFrames, 40u);
 
         for (choc::buffer::ChannelCount channel = 0; channel < numChannels; ++channel)
         {
@@ -1492,7 +1721,7 @@ void WaveNode::processSection (ProcessContext& pc, juce::Range<int64_t> timeline
 
             if (state.lastSample == 0.0)
                 continue;
-            
+
             const auto dest = destBuffer.getIterator (channel).sample;
 
             for (uint32_t i = 0; i < lastSampleFadeLength; ++i)
@@ -1592,7 +1821,8 @@ WaveNodeRealTime::WaveNodeRealTime (const AudioFile& af,
                                     std::optional<tempo::Sequence::Position> editTempoSeq,
                                     TimeStretcher::Mode mode,
                                     TimeStretcher::ElastiqueProOptions options,
-                                    float pitchChange)
+                                    float pitchChange,
+                                    ReadAhead readAhead_)
     : TracktionEngineNode (ps),
       editPositionTime (editTime),
       loopSectionTime (loop.rescaled (loop.getStart(), speed)),
@@ -1604,12 +1834,13 @@ WaveNodeRealTime::WaveNodeRealTime (const AudioFile& af,
       audioFile (af),
       speedFadeDescription (std::move (speedDesc)),
       editTempoSequence (std::move (editTempoSeq)),
-      timeStretcherMode (mode),
+      timeStretcherMode (utils::replaceElastiqueWithDirectModeIfNotRendering (mode, isRendering)),
       elastiqueProOptions (options),
       clipLevel (level),
       channelsToUse (channelSetToUse),
       destChannels (destChannelsToFill),
-      pitchChangeSemitones (pitchChange)
+      pitchChangeSemitones (pitchChange),
+      readAhead (readAhead_)
 {
     // This won't work with invalid or non-existent files!
     jassert (! audioFile.isNull());
@@ -1651,7 +1882,9 @@ WaveNodeRealTime::WaveNodeRealTime (const AudioFile& af,
                                     tempo::Sequence sourceFileTempoMap,
                                     SyncTempo syncTempo_,
                                     SyncPitch syncPitch_,
-                                    std::optional<tempo::Sequence> chordPitchSequence_)
+                                    std::optional<tempo::Sequence> chordPitchSequence_,
+                                    float pitchChange,
+                                    ReadAhead readAhead_)
     : TracktionEngineNode (ps),
       editPositionBeats (editTime),
       loopSectionBeats (loop),
@@ -1663,11 +1896,13 @@ WaveNodeRealTime::WaveNodeRealTime (const AudioFile& af,
       speedFadeDescription (std::move (speedDesc)),
       editTempoSequence (std::move (editTempoSeq)),
       warpMap (std::move (warp)),
-      timeStretcherMode (mode),
+      timeStretcherMode (utils::replaceElastiqueWithDirectModeIfNotRendering (mode, isRendering)),
       elastiqueProOptions (options),
       clipLevel (level),
       channelsToUse (channelSetToUse),
-      destChannels (destChannelsToFill)
+      destChannels (destChannelsToFill),
+      pitchChangeSemitones (pitchChange),
+      readAhead (readAhead_)
 {
     syncTempo = syncTempo_;
     syncPitch = syncPitch_;
@@ -1709,6 +1944,8 @@ WaveNodeRealTime::WaveNodeRealTime (const AudioFile& af,
 
     if (chordPitchSequence)
         hash_combine (stateHash, chordPitchSequence->hash());
+
+    hash_combine (stateHash, pitchChangeSemitones);
 }
 
 //==============================================================================
@@ -1736,6 +1973,7 @@ tracktion::graph::NodeProperties WaveNodeRealTime::getNodeProperties()
 void WaveNodeRealTime::prepareToPlay (const tracktion::graph::PlaybackInitialisationInfo& info)
 {
     outputSampleRate = info.sampleRate;
+    outputBlockSize = info.blockSize;
 
     replaceStateIfPossible (info.nodeGraphToReplace);
     buildAudioReaderGraph();
@@ -1770,19 +2008,44 @@ bool WaveNodeRealTime::buildAudioReaderGraph()
     if (editReader)
         return true;
 
-    auto fileCacheReader = audioFile.engine->getAudioFileManager().cache.createReader (audioFile);
+    AudioFileCache::Reader::Ptr fileCacheReader;
+
+    // Try creating a MemoryMappedFileReader first for compressed formats
+    if (audioFile.getInfo().needsCachedProxy)
+    {
+        if (auto bufferedFileReader = audioFile.engine->getBufferedAudioFileManager().get (audioFile.getFile()))
+        {
+            fileCacheReader = audioFile.engine->getAudioFileManager().cache.createFallbackReader ([&bufferedFileReader] (juce::TimeSliceThread&, int) mutable -> std::unique_ptr<FallbackReader>
+                                                                                                  {
+                                                                                                      return std::make_unique<BufferedFileReaderWrapper> (std::move (bufferedFileReader));
+                                                                                                  });
+        }
+    }
+
+    if (! fileCacheReader)
+        fileCacheReader = audioFile.engine->getAudioFileManager().cache.createReader (audioFile);
 
     if (fileCacheReader == nullptr || fileCacheReader->getSampleRate() == 0.0)
         return false;
 
-    std::unique_ptr<AudioReader> loopReader = std::make_unique<AudioFileCacheReader> (std::move (fileCacheReader), isOfflineRender ? 5s : 0ms,
-                                                                                      destChannels, channelsToUse);
+    auto audioFileCacheReader = std::make_unique<AudioFileCacheReader> (std::move (fileCacheReader), isOfflineRender ? 5s : 0ms,
+                                                                        destChannels, channelsToUse);
+    std::unique_ptr<AudioReader> loopReader;
 
     if (warpMap)
-        loopReader = std::make_unique<WarpReader> (std::move (loopReader), std::move (*warpMap));
+    {
+        // If we're using a warp map, the looping as to be applied above the warp so the loop times don't get warped
+        // This can have performance hits though
+        loopReader = std::make_unique<WarpReader> (std::move (audioFileCacheReader), std::move (*warpMap), timeStretcherMode, elastiqueProOptions);
 
-    if (! loopSectionTime.isEmpty())
-        loopReader = std::make_unique<LoopReader> (std::move (loopReader), loopSectionTime);
+        if (! loopSectionTime.isEmpty())
+            loopReader = std::make_unique<LoopReader> (std::move (loopReader), loopSectionTime);
+    }
+    else
+    {
+        audioFileCacheReader->setLoopRange (loopSectionTime);
+        loopReader = std::move (audioFileCacheReader);
+    }
 
     const bool timestretchDisabled = timeStretcherMode == TimeStretcher::Mode::disabled;
     std::unique_ptr<ResamplerReader> resamplerAudioReader;
@@ -1793,10 +2056,15 @@ bool WaveNodeRealTime::buildAudioReaderGraph()
         resamplerAudioReader    = std::make_unique<HighQualityResamplerReader> (std::move (loopReader), outputSampleRate, resamplingQuality);
 
     resamplerReader = resamplerAudioReader.get();
-    std::unique_ptr<TimeStretchReader> timeStretchReader;
+    std::unique_ptr<TimeStretchReaderBase> timeStretchReader;
 
     if (! timestretchDisabled)
-        timeStretchReader = std::make_unique<TimeStretchReader> (std::move (resamplerAudioReader));
+    {
+        if (readAhead == ReadAhead::no)
+            timeStretchReader = std::make_unique<TimeStretchReader> (std::move (resamplerAudioReader), timeStretcherMode, elastiqueProOptions);
+        else
+            timeStretchReader = std::make_unique<ReadAheadTimeStretchReader> (std::move (resamplerAudioReader), timeStretcherMode, elastiqueProOptions, outputBlockSize);
+    }
 
     auto timeStretcher = timeStretchReader.get();
     std::unique_ptr<TimeRangeReader> timeRangeReader;
@@ -1916,6 +2184,19 @@ void WaveNodeRealTime::processSection (ProcessContext& pc)
             || sectionEditBeats.getStart() >= (editPositionBeats.getEnd() + *dynamicOffsetBeats)))
       return;
 
+    const bool sectionContainsStartOfClip = [&]
+    {
+        if (editReader->isTimeBased()
+            && sectionEditTime.contains (editPositionTime.getStart()))
+           return true;
+
+        if (editReader->isBeatBased()
+            && (sectionEditBeats.contains (editPositionBeats.getStart() + *dynamicOffsetBeats)))
+           return true;
+
+        return false;
+    }();
+
     auto destBuffer = pc.buffers.audio;
     const auto numFrames = destBuffer.getNumFrames();
     const auto numChannels = destBuffer.getNumChannels();
@@ -1943,12 +2224,12 @@ void WaveNodeRealTime::processSection (ProcessContext& pc)
 
     // Read through the audio stack
     const auto isContiguous = getPlayHeadState().isContiguousWithPreviousBlock();
-    uint32_t lastSampleFadeLength = isFirstBlock ? std::min (numFrames, 10u) : 0;
+    uint32_t lastSampleFadeLength = (isFirstBlock && ! sectionContainsStartOfClip) ? std::min (numFrames, 10u) : 0;
     isFirstBlock = false;
 
     if (editReader->read (sectionEditBeats, sectionEditTime, pc.buffers.audio, isContiguous, getPlaybackSpeedRatio()))
     {
-        if (! isContiguous && ! getPlayHeadState().isFirstBlockOfLoop())
+        if (! isContiguous && (! getPlayHeadState().isFirstBlockOfLoop()) && (! sectionContainsStartOfClip))
             lastSampleFadeLength = std::min (numFrames, 40u);
     }
     else

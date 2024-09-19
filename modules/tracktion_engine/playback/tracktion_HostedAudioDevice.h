@@ -1,6 +1,6 @@
 /*
     ,--.                     ,--.     ,--.  ,--.
-  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2018
+  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2024
   '-.  .-'|  .--' ,-.  | .--'|     /'-.  .-',--.| .-. ||      \   Tracktion Software
     |  |  |  |  \ '-'  \ `--.|  \  \  |  |  |  |' '-' '|  ||  |       Corporation
     `---' `--'   `--`--'`---'`--'`--' `---' `--' `---' `--''--'    www.tracktion.com
@@ -50,6 +50,12 @@ public:
 
         /** Names of your audio channels. If left empty, names will automatically be generated */
         juce::StringArray inputNames, outputNames;
+
+        /** @internal The number of samples to delay the input by. N.B. For testing only. */
+        int inputLatencyNumSamples = 0;
+
+        /** @internal The number of samples to delay the output by. N.B. For testing only. */
+        int outputLatencyNumSamples = 0;
     };
 
     void initialise (const Parameters&);
@@ -62,7 +68,7 @@ public:
 
     /** Returns true if the MidiInput device is a HostedMidiInputDevice. */
     static bool isHostedMidiInputDevice (const MidiInputDevice&);
-    
+
 private:
     friend DeviceManager;
     friend class HostedAudioDevice;
@@ -73,17 +79,18 @@ private:
     juce::StringArray getInputChannelNames();
     juce::StringArray getOutputChannelNames();
 
-    MidiOutputDevice* createMidiOutput();
-    MidiInputDevice* createMidiInput();
+    std::shared_ptr<MidiOutputDevice> createMidiOutput();
+    std::shared_ptr<MidiInputDevice> createMidiInput();
 
     Engine& engine;
     Parameters parameters;
     HostedAudioDeviceType* deviceType = nullptr;
 
-    juce::Array<MidiOutputDevice*> midiOutputs;
-    juce::Array<MidiInputDevice*> midiInputs;
+    std::vector<std::shared_ptr<MidiOutputDevice>> midiOutputs;
+    std::vector<std::shared_ptr<MidiInputDevice>> midiInputs;
 
     int maxChannels = 0;
+    std::unique_ptr<LatencyProcessor> inputLatencyProcessor, outputLatencyProcessor;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HostedAudioDeviceInterface)
 };

@@ -1,6 +1,6 @@
 /*
     ,--.                     ,--.     ,--.  ,--.
-  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2018
+  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2024
   '-.  .-'|  .--' ,-.  | .--'|     /'-.  .-',--.| .-. ||      \   Tracktion Software
     |  |  |  |  \ '-'  \ `--.|  \  \  |  |  |  |' '-' '|  ||  |       Corporation
     `---' `--'   `--`--'`---'`--'`--' `---' `--' `---' `--''--'    www.tracktion.com
@@ -86,6 +86,9 @@ private:
 
         clip1->setAutoTempo (true);
         clip2->setAutoTempo (true);
+
+        clip1->setTimeStretchMode (TimeStretcher::soundtouchBetter);
+        clip2->setTimeStretchMode (TimeStretcher::soundtouchBetter);
 
         beginTest ("Clip properties");
         {
@@ -399,18 +402,18 @@ public:
     ContainerClipBenchmarks()
         : juce::UnitTest ("ContainerClip", "tracktion_benchmarks")
     {}
-    
+
     void runTest() override
     {
         runCreateLoopedContainerClipBenchmark();
     }
-    
+
 private:
     BenchmarkDescription getDescription (std::string bmName)
     {
         const auto bmCategory = (getName() + "/" + getCategory()).toStdString();
         const auto bmDescription = bmName;
-        
+
         return { std::hash<std::string>{} (bmName + bmCategory + bmDescription),
             bmCategory, bmName, bmDescription };
     }

@@ -1,6 +1,6 @@
 /*
     ,--.                     ,--.     ,--.  ,--.
-  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2018
+  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2024
   '-.  .-'|  .--' ,-.  | .--'|     /'-.  .-',--.| .-. ||      \   Tracktion Software
     |  |  |  |  \ '-'  \ `--.|  \  \  |  |  |  |' '-' '|  ||  |       Corporation
     `---' `--'   `--`--'`---'`--'`--' `---' `--' `---' `--''--'    www.tracktion.com
@@ -10,6 +10,20 @@
 
 namespace tracktion { inline namespace engine
 {
+
+static bool isDialogOpen()
+{
+    auto& mm = *juce::ModalComponentManager::getInstance();
+    if (mm.getNumModalComponents() > 0)
+        return true;
+
+    for (int i = juce::TopLevelWindow::getNumTopLevelWindows(); --i >= 0;)
+        if (auto w = juce::TopLevelWindow::getTopLevelWindow (i))
+            if (dynamic_cast<juce::AlertWindow*> (w))
+                return true;
+
+    return false;
+}
 
 PluginWindowState::PluginWindowState (Edit& e)
    : edit (e),
@@ -74,34 +88,23 @@ void PluginWindowState::hideWindowForShutdown()
     stopTimer();
 }
 
-void PluginWindowState::pickDefaultWindowBounds()
-{
-    lastWindowBounds = { 100, 100, 600, 500 };
-
-    if (auto focused = juce::Component::getCurrentlyFocusedComponent())
-        lastWindowBounds.setPosition (focused->getTopLevelComponent()->getPosition()
-                                        + juce::Point<int> (80, 80));
-}
-
 void PluginWindowState::showWindow()
 {
+    if (isDialogOpen())
+        return;
+
     if (! pluginWindow)
     {
         // Ensure at least 40px of the window is on screen
         const auto displayRects = []
         {
             juce::RectangleList<int> trimmedDisplays;
-            
+
             for (auto rect : juce::Desktop::getInstance().getDisplays().getRectangleList (true))
                 trimmedDisplays.addWithoutMerging (rect.withTrimmedLeft (100).withTrimmedRight (100).withTrimmedBottom (100));
-            
+
             return trimmedDisplays;
         }();
-        
-        const bool windowBoundsIsOnScreen = displayRects.intersectsRectangle (lastWindowBounds);
-
-        if (lastWindowBounds.isEmpty() || ! windowBoundsIsOnScreen)
-            pickDefaultWindowBounds();
 
         juce::WeakReference<juce::Component> oldFocus (juce::Component::getCurrentlyFocusedComponent());
         pluginWindow = engine.getUIBehaviour().createPluginWindow (*this);
@@ -152,6 +155,23 @@ void PluginWindowState::timerCallback()
     {
         deleteWindow();
     }
+}
+
+juce::Point<int> PluginWindowState::choosePositionForPluginWindow()
+{
+    if (lastWindowBounds)
+        return lastWindowBounds->getPosition();
+
+    if (auto focused = juce::Component::getCurrentlyFocusedComponent())
+        return focused->getTopLevelComponent()->getPosition() + juce::Point<int> (80, 80);
+
+    for (int i = juce::ComponentPeer::getNumPeers(); --i >= 0;)
+        if (auto p = juce::ComponentPeer::getPeer(i))
+            if (p->isFocused())
+                return p->getBounds().getPosition() + juce::Point<int> (80, 80);
+
+    return juce::Desktop::getInstance().getDisplays()
+            .getPrimaryDisplay()->userArea.getRelativePoint (0.2f, 0.2f);
 }
 
 }} // namespace tracktion { inline namespace engine

@@ -1,6 +1,6 @@
 /*
     ,--.                     ,--.     ,--.  ,--.
-  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2018
+  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2024
   '-.  .-'|  .--' ,-.  | .--'|     /'-.  .-',--.| .-. ||      \   Tracktion Software
     |  |  |  |  \ '-'  \ `--.|  \  \  |  |  |  |' '-' '|  ||  |       Corporation
     `---' `--'   `--`--'`---'`--'`--' `---' `--' `---' `--''--'    www.tracktion.com
@@ -14,6 +14,7 @@ namespace tracktion { inline namespace engine
 {
 
 AuxSendNode::AuxSendNode (std::unique_ptr<Node> inputNode, int busIDToUse,
+                          SampleRateAndBlockSize info,
                           AuxSendPlugin& sourceSendPlugin, tracktion::graph::PlayHeadState& phs,
                           const TrackMuteState* trackMuteState, bool processAuxSendsWhenTrackIsMuted)
     : SendNode (std::move (inputNode), busIDToUse,
@@ -45,6 +46,15 @@ AuxSendNode::AuxSendNode (std::unique_ptr<Node> inputNode, int busIDToUse,
       sendPlugin (sourceSendPlugin)
 {
     jassert (pluginPtr != nullptr);
+
+    sendPlugin.baseClassInitialise ({ TimePosition(), info.sampleRate, info.blockSize });
+    isInitialised = true;
+}
+
+AuxSendNode::~AuxSendNode()
+{
+    if (isInitialised && ! sendPlugin.baseClassNeedsInitialising())
+        sendPlugin.baseClassDeinitialise();
 }
 
 //==============================================================================
@@ -64,7 +74,7 @@ NodeProperties AuxSendNode::getNodeProperties()
 void AuxSendNode::prepareToPlay (const tracktion::graph::PlaybackInitialisationInfo& info)
 {
     sampleRate = info.sampleRate;
-    
+
     if (auto props = getNodeProperties(); props.latencyNumSamples > 0)
         automationAdjustmentTime = TimeDuration::fromSamples (-props.latencyNumSamples, sampleRate);
 
@@ -80,7 +90,7 @@ void AuxSendNode::process (ProcessContext& pc)
         const auto editTime = TimePosition::fromSamples (editSamplePos, sampleRate) + automationAdjustmentTime;
         sendPlugin.updateParameterStreams (editTime);
     }
-    
+
     SendNode::process (pc);
 }
 

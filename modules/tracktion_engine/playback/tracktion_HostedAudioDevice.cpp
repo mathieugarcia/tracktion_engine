@@ -25,11 +25,11 @@ public:
             onDestroy (this);
     }
 
-    juce::StringArray getOutputChannelNames() override      { return audioIf.getOutputChannelNames();   }
-    juce::StringArray getInputChannelNames() override       { return audioIf.getInputChannelNames();    }
-    juce::Array<double> getAvailableSampleRates() override  { return { audioIf.parameters.sampleRate }; }
-    juce::Array<int> getAvailableBufferSizes() override     { return { audioIf.parameters.blockSize };  }
-    int getDefaultBufferSize() override                     { return audioIf.parameters.blockSize;      }
+    juce::StringArray getOutputChannelNames() override      { return audioIf.getOutputChannelNames();               }
+    juce::StringArray getInputChannelNames() override       { return audioIf.getInputChannelNames();                }
+    juce::Array<double> getAvailableSampleRates() override  { return { audioIf.parameters.sampleRate };             }
+    juce::Array<int> getAvailableBufferSizes() override     { return { audioIf.parameters.blockSize };              }
+    int getDefaultBufferSize() override                     { return audioIf.parameters.blockSize;                  }
 
     juce::String open (const juce::BigInteger& inputChannels,
                        const juce::BigInteger& outputChannels,
@@ -56,8 +56,8 @@ public:
     bool isPlaying() override                               { return true;  }
     juce::String getLastError() override                    { return {};    }
     int getCurrentBitDepth() override                       { return 16;    }
-    int getOutputLatencyInSamples() override                { return 0;     }
-    int getInputLatencyInSamples() override                 { return 0;     }
+    int getOutputLatencyInSamples() override                { return audioIf.parameters.outputLatencyNumSamples; }
+    int getInputLatencyInSamples() override                 { return audioIf.parameters.inputLatencyNumSamples; }
     bool hasControlPanel() const override                   { return false; }
     bool showControlPanel() override                        { return false; }
     bool setAudioPreprocessingEnabled (bool) override       { return false; }
@@ -156,13 +156,8 @@ class HostedMidiInputDevice : public MidiInputDevice
 {
 public:
     HostedMidiInputDevice (HostedAudioDeviceInterface& aif)
-        : MidiInputDevice (aif.engine, TRANS("MIDI Input"), TRANS("MIDI Input")), audioIf (aif)
+        : MidiInputDevice (aif.engine, TRANS("MIDI Input"), TRANS("MIDI Input"), "MIDI Input")
     {
-    }
-
-    ~HostedMidiInputDevice() override
-    {
-        audioIf.midiInputs.removeFirstMatchingValue (this);
     }
 
     DeviceType getDeviceType() const override
@@ -178,14 +173,14 @@ public:
     void loadProps() override
     {
         auto n = engine.getPropertyStorage().getXmlPropertyItem (SettingID::midiin, getName());
-        MidiInputDevice::loadProps (n.get());
+        MidiInputDevice::loadMidiProps (n.get());
     }
 
     void saveProps() override
     {
         juce::XmlElement n ("SETTINGS");
 
-        MidiInputDevice::saveProps (n);
+        MidiInputDevice::saveMidiProps (n);
 
         engine.getPropertyStorage().setXmlPropertyItem (SettingID::midiin, getName(), n);
     }
@@ -226,25 +221,6 @@ private:
         {
         }
 
-        bool startRecording() override
-        {
-            // We need to keep a list of tracks the are being recorded to
-            // here, since user may un-arm track to stop recording
-            activeTracks.clear();
-
-            for (auto destTrack : getTargetTracks())
-                if (isRecordingActive (*destTrack))
-                    activeTracks.add (destTrack);
-
-            if (! recording)
-            {
-                getHostedMidiInputDevice().masterTimeUpdate (startTime.inSeconds());
-                recording = true;
-            }
-
-            return recording;
-        }
-
         void processBlock (juce::MidiBuffer& midi)
         {
             const auto globalStreamTime = edit.engine.getDeviceManager().getCurrentStreamTime();
@@ -261,17 +237,18 @@ private:
                 handleIncomingMidiMessage (std::move (msg));
             }
         }
-        
+
     private:
         const double sampleRate = context.getSampleRate();
 
         HostedMidiInputDevice& getHostedMidiInputDevice() const   { return static_cast<HostedMidiInputDevice&> (owner); }
     };
-    
+
     //==============================================================================
-    HostedAudioDeviceInterface& audioIf;
     juce::MidiBuffer pendingMidiMessages;
     juce::CriticalSection pendingMidiMessagesMutex;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HostedMidiInputDevice)
 };
 
 //==============================================================================
@@ -279,13 +256,9 @@ class HostedMidiOutputDevice : public MidiOutputDevice
 {
 public:
     HostedMidiOutputDevice (HostedAudioDeviceInterface& aif)
-        : MidiOutputDevice (aif.engine, TRANS("MIDI Output"), -1), audioIf (aif)
+        : MidiOutputDevice (aif.engine, { TRANS("MIDI Output"), juce::String() }), 
+          audioIf (aif)
     {
-    }
-
-    ~HostedMidiOutputDevice() override
-    {
-        audioIf.midiOutputs.removeFirstMatchingValue (this);
     }
 
     MidiOutputDeviceInstance* createInstance (EditPlaybackContext& epc) override
@@ -300,7 +273,7 @@ public:
             auto t = m.getTimeStamp() * audioIf.parameters.sampleRate;
             midi.addEvent (m, int (t));
         }
-        
+
         toSend.clear();
     }
 
@@ -311,9 +284,8 @@ public:
     }
 
 private:
-    class HostedMidiOutputDeviceInstance : public MidiOutputDeviceInstance
+    struct HostedMidiOutputDeviceInstance : public MidiOutputDeviceInstance
     {
-    public:
         HostedMidiOutputDeviceInstance (HostedMidiOutputDevice& o, EditPlaybackContext& epc)
             : MidiOutputDeviceInstance (o, epc), outputDevice (o)
         {
@@ -332,9 +304,11 @@ private:
     };
 
     HostedAudioDeviceInterface& audioIf;
-
     MidiMessageArray toSend;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HostedMidiOutputDevice)
 };
+
 //==============================================================================
 HostedAudioDeviceInterface::HostedAudioDeviceInterface (Engine& e)
     : engine (e)
@@ -365,22 +339,43 @@ void HostedAudioDeviceInterface::initialise (const Parameters& p)
     jassert (dm.deviceManager.getCurrentAudioDeviceType() == "Hosted Device");
     jassert (dm.deviceManager.getCurrentDeviceTypeObject() == deviceType);
 
-    for (int i = 0; i < dm.getNumWaveOutDevices(); i++)
-        if (auto wo = dm.getWaveOutDevice (i))
-            wo->setEnabled (true);
+    // Outputs
+    {
+        if (parameters.outputLatencyNumSamples > 0)
+        {
+            outputLatencyProcessor = std::make_unique<LatencyProcessor>();
+            outputLatencyProcessor->setLatencyNumSamples (parameters.outputLatencyNumSamples);
+        }
 
-    for (int i = 0; i < dm.getNumWaveInDevices(); i++)
-        if (auto wi = dm.getWaveInDevice (i))
+        for (int i = 0; i < dm.getNumWaveOutDevices(); i++)
+            if (auto wo = dm.getWaveOutDevice (i))
+                wo->setEnabled (true);
+    }
+
+    // Inputs
+    {
+        if (parameters.inputLatencyNumSamples > 0)
+        {
+            inputLatencyProcessor = std::make_unique<LatencyProcessor>();
+            inputLatencyProcessor->setLatencyNumSamples (parameters.inputLatencyNumSamples);
+        }
+
+        // Set the stereo channels first and then dispatch this syncronously before
+        // changing the properties of the devices as they may have changed
+        for (auto wi : dm.getWaveInputDevices())
             wi->setStereoPair (false);
 
-    for (int i = 0; i < dm.getNumWaveInDevices(); i++)
-    {
-        if (auto wi = dm.getWaveInDevice (i))
+        dm.dispatchPendingUpdates();
+
+        for (auto wi : dm.getWaveInputDevices())
         {
-            wi->setEndToEnd (true);
+            wi->setMonitorMode (InputDevice::MonitorMode::on);
             wi->setEnabled (true);
         }
     }
+
+    if (deviceType != nullptr)
+        deviceType->settingsChanged();
 }
 
 void HostedAudioDeviceInterface::prepareToPlay (double sampleRate, int blockSize)
@@ -396,6 +391,12 @@ void HostedAudioDeviceInterface::prepareToPlay (double sampleRate, int blockSize
         parameters.sampleRate = sampleRate;
         parameters.blockSize  = blockSize;
 
+        if (inputLatencyProcessor)
+            inputLatencyProcessor->prepareToPlay (sampleRate, blockSize, parameters.inputChannels);
+
+        if (outputLatencyProcessor)
+            outputLatencyProcessor->prepareToPlay (sampleRate, blockSize, parameters.outputChannels);
+
         if (deviceType != nullptr)
             deviceType->settingsChanged();
     }
@@ -403,8 +404,14 @@ void HostedAudioDeviceInterface::prepareToPlay (double sampleRate, int blockSize
 
 void HostedAudioDeviceInterface::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
-    for (auto input : midiInputs)
-        if (auto hostedInput = dynamic_cast<HostedMidiInputDevice*> (input))
+    if (inputLatencyProcessor)
+    {
+        inputLatencyProcessor->writeAudio (toBufferView (buffer));
+        inputLatencyProcessor->readAudioOverwriting (toBufferView (buffer));
+    }
+
+    for (auto& input : midiInputs)
+        if (auto hostedInput = dynamic_cast<HostedMidiInputDevice*> (input.get()))
             hostedInput->processBlock (midi);
 
     midi.clear();
@@ -412,8 +419,14 @@ void HostedAudioDeviceInterface::processBlock (juce::AudioBuffer<float>& buffer,
     if (deviceType != nullptr)
         deviceType->processBlock (buffer);
 
-    for (auto output : midiOutputs)
-        if (auto hostedOutput = dynamic_cast<HostedMidiOutputDevice*> (output))
+    if (outputLatencyProcessor)
+    {
+        outputLatencyProcessor->writeAudio (toBufferView (buffer));
+        outputLatencyProcessor->readAudioOverwriting (toBufferView (buffer));
+    }
+
+    for (auto& output : midiOutputs)
+        if (auto hostedOutput = dynamic_cast<HostedMidiOutputDevice*> (output.get()))
             hostedOutput->processBlock (midi);
 }
 
@@ -452,18 +465,16 @@ juce::StringArray HostedAudioDeviceInterface::getOutputChannelNames()
     return res;
 }
 
-MidiOutputDevice* HostedAudioDeviceInterface::createMidiOutput()
+std::shared_ptr<MidiOutputDevice> HostedAudioDeviceInterface::createMidiOutput()
 {
-    auto device = new HostedMidiOutputDevice (*this);
-    midiOutputs.add (device);
-    return device;
+    midiOutputs.push_back (std::make_shared<HostedMidiOutputDevice> (*this));
+    return midiOutputs.back();
 }
 
-MidiInputDevice* HostedAudioDeviceInterface::createMidiInput()
+std::shared_ptr<MidiInputDevice> HostedAudioDeviceInterface::createMidiInput()
 {
-    auto device = new HostedMidiInputDevice (*this);
-    midiInputs.add (device);
-    return device;
+    midiInputs.push_back (std::make_shared<HostedMidiInputDevice> (*this));
+    return midiInputs.back();
 }
 
 }} // namespace tracktion { inline namespace engine

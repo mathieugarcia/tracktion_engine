@@ -1,6 +1,6 @@
 /*
     ,--.                     ,--.     ,--.  ,--.
-  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2018
+  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2024
   '-.  .-'|  .--' ,-.  | .--'|     /'-.  .-',--.| .-. ||      \   Tracktion Software
     |  |  |  |  \ '-'  \ `--.|  \  \  |  |  |  |' '-' '|  ||  |       Corporation
     `---' `--'   `--`--'`---'`--'`--' `---' `--' `---' `--''--'    www.tracktion.com
@@ -36,7 +36,14 @@ public:
     void initialiseFully() override;
     void forceFullReinitialise();
 
+    /// Returns an error message if the plugin failed to load
     juce::String getLoadError();
+
+    /** Returns true if the plugin has started initialising but not completed yet.
+        This happens in the case of some external formats like AUv3. You can use
+        this to show an indicator in your UI.
+    */
+    bool isInitialisingAsync() const;
 
     static const char* xmlTypeName;
 
@@ -50,6 +57,7 @@ public:
     void initialise (const PluginInitialisationInfo&) override;
     void deinitialise() override;
     void reset() override;
+    void midiPanic() override;
     void setEnabled (bool enabled) override;
 
     juce::Array<Exportable::ReferencedItem> getReferencedItems() override;
@@ -76,10 +84,9 @@ public:
     double getLatencySeconds() override     { return latencySeconds; }
     bool noTail() override;
     double getTailLength() const override;
-    bool needsConstantBufferSize() override { return false; }
     void trackPropertiesChanged() override;
 
-    juce::AudioProcessor* getWrappedAudioProcessor() const override     { return pluginInstance.get(); }
+    juce::AudioProcessor* getWrappedAudioProcessor() const override     { return getAudioPluginInstance(); }
     void deleteFromParent() override;
 
     //==============================================================================
@@ -125,25 +132,29 @@ public:
 
     ActiveNoteList getActiveNotes() const           { return activeNotes; }
 
+    //==============================================================================
+    std::unique_ptr<EditorComponent> createEditor() override;
+
 private:
     //==============================================================================
-    juce::CriticalSection lock;
+    juce::CriticalSection processMutex;
     juce::String debugName, identiferString, loadError;
 
-    struct ProcessorChangedManager;
-    std::unique_ptr<juce::AudioPluginInstance> pluginInstance;
-    std::unique_ptr<ProcessorChangedManager> processorChangedManager;
+    class ProcessorChangedManager;
+    class LoadedInstance;
+    std::unique_ptr<LoadedInstance> loadedInstance;
+    std::atomic<bool> hasLoadedInstance { false }, isInstancePrepared { false }, isAsyncInitialising { false };
+
     std::unique_ptr<VSTXML> vstXML;
     int latencySamples = 0;
     double latencySeconds = 0;
-    bool isInstancePrepared = false;
-    std::atomic<bool> isCreatingInstance = false;
 
     double lastSampleRate = 0.0;
     int lastBlockSizeSamples = 0;
 
     juce::MidiBuffer midiBuffer;
     MidiMessageArray::MPESourceID midiSourceID = MidiMessageArray::createUniqueMPESourceID();
+    std::atomic<bool> midiPanicNeeded { false };
 
     ActiveNoteList activeNotes;
 
@@ -160,8 +171,8 @@ private:
     juce::Array<ExternalAutomatableParameter*> autoParamForParamNumbers;
 
     //==============================================================================
-    static bool requiresAsyncInstantiation (Engine&, const juce::PluginDescription&);
-    void createPluginInstance (const juce::PluginDescription&);
+    void startPluginInstanceCreation (const juce::PluginDescription&);
+    void completePluginInstanceCreation (std::unique_ptr<juce::AudioPluginInstance>);
     void deletePluginInstance();
 
     //==============================================================================
@@ -170,17 +181,19 @@ private:
 
     //==============================================================================
     void doFullInitialisation();
-    void completePluginInitialisation();
     void buildParameterList();
     void refreshParameterValues();
     void updateDebugName();
-    void processPluginBlock (const PluginRenderContext&, bool processedBypass);
+    void processPluginBlock (juce::AudioPluginInstance&, const PluginRenderContext&, bool processedBypass);
 
     std::unique_ptr<juce::PluginDescription> findMatchingPlugin() const;
     std::unique_ptr<juce::PluginDescription> findDescForUID (int uid, int deprecatedUid) const;
     std::unique_ptr<juce::PluginDescription> findDescForFileOrID (const juce::String&) const;
 
     void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override;
+
+    //==============================================================================
+    static bool requiresAsyncInstantiation (Engine&, const juce::PluginDescription&);
 
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ExternalPlugin)

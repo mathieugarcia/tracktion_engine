@@ -1,12 +1,14 @@
 /*
     ,--.                     ,--.     ,--.  ,--.
-  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2018
+  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2024
   '-.  .-'|  .--' ,-.  | .--'|     /'-.  .-',--.| .-. ||      \   Tracktion Software
     |  |  |  |  \ '-'  \ `--.|  \  \  |  |  |  |' '-' '|  ||  |       Corporation
     `---' `--'   `--`--'`---'`--'`--' `---' `--' `---' `--''--'    www.tracktion.com
 
     Tracktion Engine uses a GPL/commercial licence - see LICENCE.md for details.
 */
+
+#include "tracktion_Threads.h"
 
 namespace tracktion { inline namespace engine
 {
@@ -131,6 +133,14 @@ public:
         callback = std::move (newCallback);
     }
 
+    template<typename DurationType>
+    void startTimer (std::chrono::duration<DurationType> interval)
+    {
+        juce::Timer::startTimer (static_cast<int> (std::chrono::duration_cast<std::chrono::milliseconds> (interval).count()));
+    }
+
+    using juce::Timer::startTimer;
+
     void timerCallback() override
     {
         if (callback)
@@ -139,7 +149,10 @@ public:
 
 private:
     std::function<void()> callback;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LambdaTimer)
 };
+
 
 //==============================================================================
 /** Calls a function on the message thread checking a calling thread for an exit signal. */
@@ -175,7 +188,7 @@ public:
                 hasBeenCancelled = true;
                 cancelPendingUpdate();
             }
-            
+
             return;
         }
 
@@ -183,7 +196,7 @@ public:
         {
             while (! (thread->threadShouldExit() || hasFinished()))
                 waiter.wait (50);
-            
+
             if (thread->threadShouldExit())
             {
                 hasBeenCancelled = true;
@@ -193,9 +206,24 @@ public:
             return;
         }
 
-        TRACKTION_LOG_ERROR ("Rogue call to triggerAndWaitForCallback()");
-        jassertfalse;
-        waiter.wait (50);
+        if (isCurrentThreadSupplyingExitStatus())
+        {
+            while (! (shouldCurrentThreadExit() || hasFinished()))
+                waiter.wait (50);
+
+            if (shouldCurrentThreadExit())
+            {
+                hasBeenCancelled = true;
+                cancelPendingUpdate();
+            }
+
+            return;
+        }
+
+        // If you get a deadlock here, it's probably because your MessageManager isn't
+        // actually running and dispatching messages. This shouldn't be called with a
+        // blocked message manager
+        waiter.wait();
 
         if (! hasFinished())
         {
@@ -214,7 +242,7 @@ private:
     {
         CRASH_TRACER
         TRACKTION_ASSERT_MESSAGE_THREAD
-        
+
         if (hasBeenCancelled)
             return;
 
@@ -238,11 +266,21 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BlockingFunction)
 };
 
+/** Calls a function on the message thread by posting a message and then waiting
+    for it to be delivered. If this fails for some reason, e.g. the calling thread
+    is trying to exit or is blocking the message thread, this will throw an
+    exception.
+*/
 inline bool callBlocking (std::function<void()> f)
 {
     BlockingFunction bf (f);
     bf.triggerAndWaitForCallback();
-    return bf.hasFinished();
+
+    if (! bf.hasFinished())
+        throw std::runtime_error ("Blocking function unable to complete");
+
+    return true;
 }
+
 
 }} // namespace tracktion { inline namespace engine

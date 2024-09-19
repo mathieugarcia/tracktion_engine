@@ -1,6 +1,6 @@
 /*
     ,--.                     ,--.     ,--.  ,--.
-  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2018
+  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2024
   '-.  .-'|  .--' ,-.  | .--'|     /'-.  .-',--.| .-. ||      \   Tracktion Software
     |  |  |  |  \ '-'  \ `--.|  \  \  |  |  |  |' '-' '|  ||  |       Corporation
     `---' `--'   `--`--'`---'`--'`--' `---' `--' `---' `--''--'    www.tracktion.com
@@ -22,25 +22,21 @@ juce::String createIdentifierString (const juce::PluginDescription& d)
     return d.pluginFormatName + "-" + d.name + getDeprecatedPluginDescSuffix (d);
 }
 
-struct ExternalPlugin::ProcessorChangedManager  : public juce::AudioProcessorListener,
+class ExternalPlugin::ProcessorChangedManager   : public juce::AudioProcessorListener,
                                                   private juce::AsyncUpdater
 {
-    ProcessorChangedManager (ExternalPlugin& p) : plugin (p)
+public:
+    ProcessorChangedManager (ExternalPlugin& p, juce::AudioPluginInstance& i)
+        : plugin (p), instance (i)
     {
-        if (auto pi = plugin.getAudioPluginInstance())
-            pi->addListener (this);
-        else
-            jassertfalse;
+        instance.addListener (this);
     }
 
     ~ProcessorChangedManager() override
     {
         cancelPendingUpdate();
 
-        if (auto pi = plugin.getAudioPluginInstance())
-            pi->removeListener (this);
-        else
-            jassertfalse;
+        instance.removeListener (this);
     }
 
     void audioProcessorParameterChanged (juce::AudioProcessor*, int, float) override
@@ -61,9 +57,9 @@ struct ExternalPlugin::ProcessorChangedManager  : public juce::AudioProcessorLis
         triggerAsyncUpdate();
     }
 
-    ExternalPlugin& plugin;
-
 private:
+    ExternalPlugin& plugin;
+    juce::AudioPluginInstance& instance;
     JUCE_DECLARE_NON_COPYABLE (ProcessorChangedManager)
 
     static bool hasAnyModifiers (AutomatableEditItem& item)
@@ -143,6 +139,41 @@ private:
 };
 
 //==============================================================================
+class ExternalPlugin::LoadedInstance
+{
+public:
+    static std::unique_ptr<LoadedInstance> create (ExternalPlugin& ep, std::unique_ptr<juce::AudioPluginInstance> pi)
+    {
+        assert (pi);
+
+        // N.B. We can't use make_unique here as make_unique would need to be a friend of LoadedInstance
+        std::unique_ptr<LoadedInstance> loadedInstance (new LoadedInstance());
+        loadedInstance->pluginInstance = std::move (pi);
+        loadedInstance->processorChangedManager = std::make_unique<ProcessorChangedManager> (ep, *loadedInstance->pluginInstance);
+
+        return loadedInstance;
+    }
+
+    juce::AudioPluginInstance& getInstance()
+    {
+        return *pluginInstance;
+    }
+
+    std::unique_ptr<juce::AudioPluginInstance> releaseInstance()
+    {
+        processorChangedManager.reset();
+        return std::move (pluginInstance);
+    }
+
+private:
+    std::unique_ptr<juce::AudioPluginInstance> pluginInstance;
+    std::unique_ptr<ProcessorChangedManager> processorChangedManager;
+
+    LoadedInstance() = default;
+};
+
+
+//==============================================================================
 struct AsyncPluginDeleter  : private juce::Timer,
                              private juce::DeletedAtShutdown
 {
@@ -160,11 +191,11 @@ struct AsyncPluginDeleter  : private juce::Timer,
 
     JUCE_DECLARE_SINGLETON (AsyncPluginDeleter, false)
 
-    void deletePlugin (juce::AudioPluginInstance* p)
+    void deletePlugin (std::unique_ptr<juce::AudioPluginInstance> p)
     {
-        if (p != nullptr)
+        if (p)
         {
-            plugins.add (p);
+            plugins.add (p.release());
             startTimer (100);
         }
     }
@@ -517,8 +548,6 @@ namespace
 ExternalPlugin::ExternalPlugin (PluginCreationInfo info)  : Plugin (info)
 {
     CRASH_TRACER
-  
-    static_assert(std::atomic<bool>::is_always_lock_free);
 
     auto um = getUndoManager();
 
@@ -560,36 +589,25 @@ juce::ValueTree ExternalPlugin::create (Engine& e, const juce::PluginDescription
 
 juce::String ExternalPlugin::getLoadError()
 {
-    if (pluginInstance != nullptr)
+    if (hasLoadedInstance || isAsyncInitialising)
         return {};
 
-    if (loadError.isEmpty())
-        return TRANS("ERROR! - This plugin couldn't be loaded!");
-
-    return loadError;
+    return loadError.isEmpty() ? TRANS("ERROR! - This plugin couldn't be loaded!")
+                               : loadError;
 }
 
-bool ExternalPlugin::requiresAsyncInstantiation (Engine& e, const juce::PluginDescription& desc)
+bool ExternalPlugin::isInitialisingAsync() const
 {
-  auto formats = e.getPluginManager().pluginFormatManager.getFormats();
-  
-  for (auto* format : formats)
-      if (format->getName() == desc.pluginFormatName
-            && format->fileMightContainThisPluginType (desc.fileOrIdentifier)
-            && format->requiresUnblockedMessageThreadDuringCreation (desc))
-        return true;
-
-  return false;
+    return isAsyncInitialising;
 }
 
 const char* ExternalPlugin::xmlTypeName = "vst";
 
 void ExternalPlugin::initialiseFully()
 {
-    if (! fullyInitialised)
+    if (! std::exchange (fullyInitialised, true))
     {
         CRASH_TRACER_PLUGIN (getDebugName());
-        fullyInitialised = true;
         doFullInitialisation();
     }
 }
@@ -603,10 +621,9 @@ void ExternalPlugin::forceFullReinitialise()
     initialiseFully();
     changed();
 
-    if (isInstancePrepared && pluginInstance->getSampleRate() > 0 && pluginInstance->getBlockSize() > 0)
-    {
-        pluginInstance->prepareToPlay (pluginInstance->getSampleRate(), pluginInstance->getBlockSize());
-    }
+    if (isInstancePrepared)
+        if (auto pi = getAudioPluginInstance(); pi->getSampleRate() > 0 && pi->getBlockSize() > 0)
+            pi->prepareToPlay (pi->getSampleRate(), pi->getBlockSize());
 
     edit.restartPlayback();
     SelectionManager::refreshAllPropertyPanelsShowing (*this);
@@ -630,9 +647,9 @@ void ExternalPlugin::buildParameterList()
     addAutomatableParameter (dryGain);
     addAutomatableParameter (wetGain);
 
-    if (pluginInstance != nullptr)
+    if (auto pi = getAudioPluginInstance())
     {
-        auto& parameters = pluginInstance->getParameters();
+        auto& parameters = pi->getParameters();
         jassert (parameters.size() < 80000);
         const auto maxAutoParams = std::min (80000, parameters.size());
 
@@ -640,7 +657,7 @@ void ExternalPlugin::buildParameterList()
         {
             auto parameter = parameters.getUnchecked (i);
 
-            if (parameter->isAutomatable() && ! isParameterBlacklisted (*this, *pluginInstance, *parameter))
+            if (parameter->isAutomatable() && ! isParameterBlacklisted (*this, *pi, *parameter))
             {
                 auto nm = parameter->getName (1024);
 
@@ -813,7 +830,7 @@ void ExternalPlugin::processingChanged()
 
     if (processing)
     {
-        if (pluginInstance == nullptr)
+        if (! getAudioPluginInstance())
             forceFullReinitialise();
     }
     else
@@ -834,66 +851,34 @@ void ExternalPlugin::doFullInitialisation()
         identiferString = createIdentifierString (desc);
         updateDebugName();
 
-        if (processing && pluginInstance == nullptr && engine.getEngineBehaviour().shouldLoadPlugin (*this))
+        if (processing && ! hasLoadedInstance
+            && engine.getEngineBehaviour().shouldLoadPlugin (*this))
         {
             if (isDisabled())
-              return;
-          
+                return;
+
             CRASH_TRACER_PLUGIN (getDebugName());
             loadError = {};
-            
+
             callBlocking ([this, &foundDesc]
-                          {
-              CRASH_TRACER_PLUGIN (getDebugName());
-              createPluginInstance (*foundDesc);
+            {
+                CRASH_TRACER_PLUGIN (getDebugName());
+                startPluginInstanceCreation (*foundDesc);
             });
         }
     }
 }
 
-void ExternalPlugin::completePluginInitialisation()
-{
-    if (pluginInstance != nullptr)
-    {
-        pluginInstance->enableAllBuses();
-        processorChangedManager = std::make_unique<ProcessorChangedManager> (*this);
-      
-       #if JUCE_PLUGINHOST_VST
-        if (auto xml = juce::VSTPluginFormat::getVSTXML (pluginInstance.get()))
-            vstXML.reset (VSTXML::createFor (*xml));
-
-        juce::VSTPluginFormat::setExtraFunctions (pluginInstance.get(), new ExtraVSTCallbacks (edit));
-       #endif
-
-        pluginInstance->setPlayHead (playhead.get());
-        supportsMPE = pluginInstance->supportsMPE();
-
-        engine.getEngineBehaviour().doAdditionalInitialisation (*this);
-      
-        restorePluginStateFromValueTree (state);
-        buildParameterList();
-        restoreChannelLayout (*this);
-    }
-    else
-    {
-        TRACKTION_LOG_ERROR (loadError);
-    }
-}
-
 void ExternalPlugin::trackPropertiesChanged()
 {
-    juce::MessageManager::callAsync ([this, pluginRef = getWeakRef()]
+    juce::MessageManager::callAsync ([this, pluginRef = makeSafeRef (*this)]
     {
         if (pluginRef == nullptr)
             return;
 
-        if (auto t = getOwnerTrack(); t != nullptr && pluginInstance != nullptr)
-        {
-            auto n = t->getName();
-            auto c = t->getColour();
-
-            pluginInstance->updateTrackProperties ({n, c});
-        }
+        if (auto t = getOwnerTrack(); t != nullptr)
+            if (auto pi = getAudioPluginInstance())
+                pi->updateTrackProperties ({ t->getName(), t->getColour() });
     });
 }
 
@@ -909,7 +894,6 @@ ExternalPlugin::~ExternalPlugin()
     dryGain->detachFromCurrentValue();
     wetGain->detachFromCurrentValue();
 
-    const juce::ScopedLock sl (lock);
     deletePluginInstance();
 }
 
@@ -938,20 +922,20 @@ void ExternalPlugin::flushPluginStateToValueTree()
         state.setProperty (IDs::filename, desc.fileOrIdentifier, um);
     }
 
-    if (pluginInstance != nullptr)
+    if (auto pi = getAudioPluginInstance())
     {
-        if (pluginInstance->getNumPrograms() > 0)
-            state.setProperty (IDs::programNum,  pluginInstance->getCurrentProgram(), um);
+        if (pi->getNumPrograms() > 0)
+            state.setProperty (IDs::programNum,  pi->getCurrentProgram(), um);
 
         TRACKTION_ASSERT_MESSAGE_THREAD
         juce::MemoryBlock chunk;
 
-        pluginInstance->suspendProcessing (true);
-        pluginInstance->getStateInformation (chunk);
+        pi->suspendProcessing (true);
+        pi->getStateInformation (chunk);
         saveChangedParametersToState();
-        pluginInstance->suspendProcessing (false);
+        pi->suspendProcessing (false);
 
-        engine.getEngineBehaviour().saveCustomPluginProperties (state, *pluginInstance, um);
+        engine.getEngineBehaviour().saveCustomPluginProperties (state, *pi, um);
 
         if (chunk.getSize() > 0)
             state.setProperty (IDs::state, chunk.toBase64Encoding(), um);
@@ -1001,7 +985,8 @@ void ExternalPlugin::restorePluginStateFromValueTree (const juce::ValueTree& v)
         }
     }
 
-    if (pluginInstance != nullptr && s.isNotEmpty())
+    if (auto pi = getAudioPluginInstance();
+        pi && s.isNotEmpty())
     {
         CRASH_TRACER_PLUGIN (getDebugName());
 
@@ -1012,7 +997,7 @@ void ExternalPlugin::restorePluginStateFromValueTree (const juce::ValueTree& v)
         chunk.fromBase64Encoding (s);
 
         if (chunk.getSize() > 0)
-            callBlocking ([this, &chunk]() { pluginInstance->setStateInformation (chunk.getData(), (int) chunk.getSize()); });
+            callBlocking ([&pi, &chunk] { pi->setStateInformation (chunk.getData(), (int) chunk.getSize()); });
     }
 }
 
@@ -1029,17 +1014,21 @@ void ExternalPlugin::updateFromMirroredPluginIfNeeded (Plugin& changedPlugin)
 {
     TRACKTION_ASSERT_MESSAGE_THREAD
 
-    if (changedPlugin.itemID == masterPluginID)
+    if (changedPlugin.itemID != masterPluginID)
+        return;
+
+    if (auto pi = getAudioPluginInstance())
     {
         if (auto other = dynamic_cast<ExternalPlugin*> (&changedPlugin))
         {
-            if (other->pluginInstance != nullptr && other->desc.isDuplicateOf (desc))
+            if (auto otherInstance = other->getAudioPluginInstance();
+                otherInstance && other->desc.isDuplicateOf (desc))
             {
                 juce::MemoryBlock chunk;
-                other->pluginInstance->getStateInformation (chunk);
+                otherInstance->getStateInformation (chunk);
 
                 if (chunk.getSize() > 0)
-                    pluginInstance->setStateInformation (chunk.getData(), (int) chunk.getSize());
+                    pi->setStateInformation (chunk.getData(), (int) chunk.getSize());
             }
         }
     }
@@ -1142,14 +1131,15 @@ void ExternalPlugin::initialise (const PluginInitialisationInfo& info)
 {
     CRASH_TRACER_PLUGIN (getDebugName());
 
-    const juce::ScopedLock sl (lock);
+    const juce::ScopedLock sl (processMutex);
 
     if (mpeRemapper == nullptr)
         mpeRemapper = std::make_unique<MPEChannelRemapper>();
 
     mpeRemapper->reset();
+    midiPanicNeeded = false;
 
-    if (pluginInstance != nullptr)
+    if (auto pi = getAudioPluginInstance())
     {
         // This used to releaseResources() before calling prepareToPlay().
         // However, with VST3, releaseResources() shuts down the MIDI
@@ -1157,29 +1147,29 @@ void ExternalPlugin::initialise (const PluginInitialisationInfo& info)
         // breaks all synths.
         if (! isInstancePrepared)
         {
-            pluginInstance->prepareToPlay (info.sampleRate, info.blockSizeSamples);
+            pi->prepareToPlay (info.sampleRate, info.blockSizeSamples);
             isInstancePrepared = true;
         }
         else if (info.sampleRate != lastSampleRate || info.blockSizeSamples != lastBlockSizeSamples)
         {
-            pluginInstance->prepareToPlay (info.sampleRate, info.blockSizeSamples);
+            pi->prepareToPlay (info.sampleRate, info.blockSizeSamples);
         }
 
         lastSampleRate = info.sampleRate;
         lastBlockSizeSamples = info.blockSizeSamples;
 
-        latencySamples = pluginInstance->getLatencySamples();
+        latencySamples = pi->getLatencySamples();
         latencySeconds = latencySamples / info.sampleRate;
 
         if (! desc.hasSharedContainer)
         {
-            desc = pluginInstance->getPluginDescription();
+            desc = pi->getPluginDescription();
             updateDebugName();
         }
 
-        pluginInstance->setPlayHead (nullptr);
+        pi->setPlayHead (nullptr);
         playhead = std::make_unique<PluginPlayHead> (*this);
-        pluginInstance->setPlayHead (playhead.get());
+        pi->setPlayHead (playhead.get());
     }
     else
     {
@@ -1192,12 +1182,12 @@ void ExternalPlugin::initialise (const PluginInitialisationInfo& info)
 
 void ExternalPlugin::deinitialise()
 {
-    if (pluginInstance != nullptr)
+    if (auto pi = getAudioPluginInstance())
     {
         CRASH_TRACER_PLUGIN (getDebugName());
 
-        const juce::ScopedLock sl (lock);
-        pluginInstance->setPlayHead (nullptr); // must be done first!
+        const juce::ScopedLock sl (processMutex);
+        pi->setPlayHead (nullptr); // must be done first!
 
         if (playhead != nullptr)
             playhead->setCurrentContext (nullptr);
@@ -1206,11 +1196,11 @@ void ExternalPlugin::deinitialise()
 
 void ExternalPlugin::reset()
 {
-    if (pluginInstance != nullptr)
+    if (auto pi = getAudioPluginInstance())
     {
         CRASH_TRACER_PLUGIN (getDebugName());
-        const juce::ScopedLock sl (lock);
-        pluginInstance->reset();
+        const juce::ScopedLock sl (processMutex);
+        pi->reset();
     }
 }
 
@@ -1220,16 +1210,32 @@ void ExternalPlugin::setEnabled (bool shouldEnable)
 
     if (shouldEnable != isEnabled())
     {
-        if (pluginInstance != nullptr)
-            pluginInstance->reset();
+        if (auto pi = getAudioPluginInstance())
+            pi->reset();
 
         propertiesChanged();
     }
 }
 
+void ExternalPlugin::midiPanic()
+{
+    midiPanicNeeded = true;
+}
+
 //==============================================================================
 void ExternalPlugin::prepareIncomingMidiMessages (MidiMessageArray& incoming, int numSamples, bool isPlaying)
 {
+    if (midiPanicNeeded)
+    {
+        midiPanicNeeded = false;
+
+        for (auto chan = 1; chan <= 16; ++chan)
+        {
+            midiBuffer.addEvent (juce::MidiMessage::allNotesOff (chan), 0);
+            midiBuffer.addEvent (juce::MidiMessage::controllerEvent (chan, 0x40, 0), 0); // sustain pedal off
+        }
+    }
+
     if (incoming.isAllNotesOff)
     {
         uint32_t eventsSentOnChannel = 0;
@@ -1298,7 +1304,7 @@ void ExternalPlugin::prepareIncomingMidiMessages (MidiMessageArray& incoming, in
             activeNotes.clearNote (m.getChannel(), m.getNoteNumber());
         }
 
-        auto sample = juce::jlimit (0, numSamples - 1, (int) (m.getTimeStamp() * sampleRate));
+        auto sample = juce::jlimit (0, numSamples - 1, juce::roundToInt (m.getTimeStamp() * sampleRate));
         midiBuffer.addEvent (m, sample);
     }
 
@@ -1320,117 +1326,128 @@ void ExternalPlugin::prepareIncomingMidiMessages (MidiMessageArray& incoming, in
 
 void ExternalPlugin::applyToBuffer (const PluginRenderContext& fc)
 {
-    if (isCreatingInstance.load())
-      return;
-      
-    const bool processedBypass = fc.allowBypassedProcessing && ! isEnabled();
+    if (! hasLoadedInstance.load (std::memory_order_acquire))
+        return;
 
-    if (pluginInstance != nullptr && (processedBypass || isEnabled()))
+    if (! isInstancePrepared.load (std::memory_order_acquire))
+        return;
+
+    bool pluginEnabled = isEnabled();
+
+    if (! (pluginEnabled || fc.allowBypassedProcessing))
     {
-        CRASH_TRACER_PLUGIN (getDebugName());
-        const juce::ScopedLock sl (lock);
-        jassert (isInstancePrepared);
+        midiPanicNeeded = false;
+        return;
+    }
 
-        if (playhead != nullptr)
-            playhead->setCurrentContext (&fc);
+    const bool processedBypass = ! pluginEnabled && fc.allowBypassedProcessing;
 
-        midiBuffer.clear();
+    assert (loadedInstance);
+    CRASH_TRACER_PLUGIN (getDebugName());
 
-        if (fc.bufferForMidiMessages != nullptr)
-            prepareIncomingMidiMessages (*fc.bufferForMidiMessages, fc.bufferNumSamples, fc.isPlaying);
+    const juce::ScopedLock sl (processMutex);
+    auto pi = getAudioPluginInstance();
 
-        if (fc.destBuffer != nullptr)
+    if (playhead != nullptr)
+        playhead->setCurrentContext (&fc);
+
+    midiBuffer.clear();
+
+    if (fc.bufferForMidiMessages != nullptr)
+        prepareIncomingMidiMessages (*fc.bufferForMidiMessages, fc.bufferNumSamples, fc.isPlaying);
+
+    if (fc.destBuffer != nullptr)
+    {
+        auto destNumChans = fc.destBuffer->getNumChannels();
+        jassert (destNumChans > 0);
+
+        auto numInputChannels = pi->getTotalNumInputChannels();
+        auto numOutputChannels = pi->getTotalNumOutputChannels();
+        auto numChansToProcess = std::max (std::max (1, numInputChannels), numOutputChannels);
+
+        if (destNumChans == numChansToProcess)
         {
-            auto destNumChans = fc.destBuffer->getNumChannels();
-            jassert (destNumChans > 0);
-
-            auto numInputChannels = pluginInstance->getTotalNumInputChannels();
-            auto numOutputChannels = pluginInstance->getTotalNumOutputChannels();
-            auto numChansToProcess = std::max (std::max (1, numInputChannels), numOutputChannels);
-
-            if (destNumChans == numChansToProcess)
-            {
-                processPluginBlock (fc, processedBypass);
-            }
-            else
-            {
-                AudioScratchBuffer asb (numChansToProcess, fc.bufferNumSamples);
-                auto& buffer = asb.buffer;
-
-                // Copy or existing channel or clear data
-                for (int i = 0; i < numChansToProcess; ++i)
-                {
-                    if (i < destNumChans)
-                        buffer.copyFrom (i, 0, *fc.destBuffer, i, fc.bufferStartSample, fc.bufferNumSamples);
-                    else
-                        buffer.clear (i, 0, fc.bufferNumSamples);
-                }
-
-                if (destNumChans == 1 && numInputChannels == 2)
-                {
-                    // If we're getting a mono in and need stereo, dupe the channel..
-                    buffer.copyFrom (1, 0, buffer, 0, 0, fc.bufferNumSamples);
-                }
-                else if (destNumChans == 2 && numInputChannels == 1)
-                {
-                    // If we're getting a stereo in and need mono, average the input..
-                    buffer.addFrom (0, 0, *fc.destBuffer, 1, fc.bufferStartSample, fc.bufferNumSamples);
-                    buffer.applyGain (0, 0, fc.bufferNumSamples, 0.5f);
-                }
-
-                PluginRenderContext fc2 (fc);
-                fc2.destBuffer = &asb.buffer;
-                fc2.bufferStartSample = 0;
-
-                processPluginBlock (fc2, processedBypass);
-
-                // Copy sample data back clearing unprocessed channels
-                for (int i = 0; i < destNumChans; ++i)
-                {
-                    if (i < numChansToProcess)
-                        fc.destBuffer->copyFrom (i, fc.bufferStartSample, buffer, i, 0, fc.bufferNumSamples);
-                    else if (i < 2 && numChansToProcess > 0) // convert mono output to stereo for next plugin
-                        fc.destBuffer->copyFrom (i, fc.bufferStartSample, buffer, 0, 0, fc.bufferNumSamples);
-                    else
-                        fc.destBuffer->clear (i, fc.bufferStartSample, fc.bufferNumSamples);
-                }
-            }
+            processPluginBlock (*pi, fc, processedBypass);
         }
         else
         {
-            AudioScratchBuffer asb (std::max (pluginInstance->getTotalNumInputChannels(),
-                                              pluginInstance->getTotalNumOutputChannels()), fc.bufferNumSamples);
+            AudioScratchBuffer asb (numChansToProcess, fc.bufferNumSamples);
+            auto& buffer = asb.buffer;
 
-            if (processedBypass)
-                pluginInstance->processBlockBypassed (asb.buffer, midiBuffer);
-            else
-                pluginInstance->processBlock (asb.buffer, midiBuffer);
-        }
-
-        if (fc.bufferForMidiMessages != nullptr)
-        {
-            fc.bufferForMidiMessages->clear();
-
-            if (! midiBuffer.isEmpty())
+            // Copy existing channel or clear data
+            for (int i = 0; i < numChansToProcess; ++i)
             {
-                for (auto itr : midiBuffer)
-                {
-                    const auto& msg = itr.getMessage();
-                    int midiEventPos = itr.samplePosition;
+                if (i < destNumChans)
+                    buffer.copyFrom (i, 0, *fc.destBuffer, i, fc.bufferStartSample, fc.bufferNumSamples);
+                else
+                    buffer.clear (i, 0, fc.bufferNumSamples);
+            }
 
-                    auto midiData = msg.getRawData();
-                    auto numBytes = msg.getRawDataSize();
+            if (destNumChans == 1 && numInputChannels == 2)
+            {
+                // If we're getting a mono in and need stereo, dupe the channel..
+                buffer.copyFrom (1, 0, buffer, 0, 0, fc.bufferNumSamples);
+            }
+            else if (destNumChans == 2 && numInputChannels == 1)
+            {
+                // If we're getting a stereo in and need mono, average the input..
+                buffer.addFrom (0, 0, *fc.destBuffer, 1, fc.bufferStartSample, fc.bufferNumSamples);
+                buffer.applyGain (0, 0, fc.bufferNumSamples, 0.5f);
+            }
 
-                    fc.bufferForMidiMessages->addMidiMessage (juce::MidiMessage (midiData, numBytes, fc.midiBufferOffset + midiEventPos / sampleRate),
-                                                              midiSourceID);
-                }
+            PluginRenderContext fc2 (fc);
+            fc2.destBuffer = &asb.buffer;
+            fc2.bufferStartSample = 0;
+
+            processPluginBlock (*pi, fc2, processedBypass);
+
+            // Copy sample data back clearing unprocessed channels
+            for (int i = 0; i < destNumChans; ++i)
+            {
+                if (i < numChansToProcess)
+                    fc.destBuffer->copyFrom (i, fc.bufferStartSample, buffer, i, 0, fc.bufferNumSamples);
+                else if (i < 2 && numChansToProcess > 0) // convert mono output to stereo for next plugin
+                    fc.destBuffer->copyFrom (i, fc.bufferStartSample, buffer, 0, 0, fc.bufferNumSamples);
+                else
+                    fc.destBuffer->clear (i, fc.bufferStartSample, fc.bufferNumSamples);
+            }
+        }
+    }
+    else
+    {
+        AudioScratchBuffer asb (std::max (pi->getTotalNumInputChannels(),
+                                          pi->getTotalNumOutputChannels()), fc.bufferNumSamples);
+
+        if (processedBypass)
+            pi->processBlockBypassed (asb.buffer, midiBuffer);
+        else
+            pi->processBlock (asb.buffer, midiBuffer);
+    }
+
+    if (fc.bufferForMidiMessages != nullptr)
+    {
+        fc.bufferForMidiMessages->clear();
+
+        if (! midiBuffer.isEmpty())
+        {
+            for (auto itr : midiBuffer)
+            {
+                const auto& msg = itr.getMessage();
+
+                auto midiData = msg.getRawData();
+                auto numBytes = msg.getRawDataSize();
+                auto time = fc.midiBufferOffset + itr.samplePosition / sampleRate;
+
+                fc.bufferForMidiMessages->addMidiMessage (juce::MidiMessage (midiData, numBytes, time), midiSourceID);
             }
         }
     }
 }
 
-void ExternalPlugin::processPluginBlock (const PluginRenderContext& fc, bool processedBypass)
+void ExternalPlugin::processPluginBlock (juce::AudioPluginInstance& pluginInstance, const PluginRenderContext& fc, bool processedBypass)
 {
+    // N.B. The processMutex is already locked by the calling function
+
     juce::AudioBuffer<float> asb (fc.destBuffer->getArrayOfWritePointers(), fc.destBuffer->getNumChannels(),
                                   fc.bufferStartSample, fc.bufferNumSamples);
 
@@ -1440,9 +1457,9 @@ void ExternalPlugin::processPluginBlock (const PluginRenderContext& fc, bool pro
     if (dry <= 0.00004f)
     {
         if (processedBypass)
-            pluginInstance->processBlockBypassed (asb, midiBuffer);
+            pluginInstance.processBlockBypassed (asb, midiBuffer);
         else
-            pluginInstance->processBlock (asb, midiBuffer);
+            pluginInstance.processBlock (asb, midiBuffer);
 
         zeroDenormalisedValuesIfNeeded (asb);
 
@@ -1458,9 +1475,9 @@ void ExternalPlugin::processPluginBlock (const PluginRenderContext& fc, bool pro
             dryAudio.buffer.copyFrom (i, 0, asb, i, 0, fc.bufferNumSamples);
 
         if (processedBypass)
-            pluginInstance->processBlockBypassed (asb, midiBuffer);
+            pluginInstance.processBlockBypassed (asb, midiBuffer);
         else
-            pluginInstance->processBlock (asb, midiBuffer);
+            pluginInstance.processBlock (asb, midiBuffer);
 
         zeroDenormalisedValuesIfNeeded (asb);
 
@@ -1481,7 +1498,7 @@ int ExternalPlugin::getNumOutputChannelsGivenInputs (int)
 void ExternalPlugin::getChannelNames (juce::StringArray* ins,
                                       juce::StringArray* outs)
 {
-    if (pluginInstance != nullptr)
+    if (auto pi = getAudioPluginInstance())
     {
         CRASH_TRACER_PLUGIN (getDebugName());
 
@@ -1493,22 +1510,22 @@ void ExternalPlugin::getChannelNames (juce::StringArray* ins,
 
         if (ins != nullptr)
         {
-            const int num = pluginInstance->getTotalNumInputChannels();
+            const int num = pi->getTotalNumInputChannels();
 
             for (int i = 0; i < num; ++i)
             {
-                auto name = getChannelName (pluginInstance->getBus (true, 0), i);
+                auto name = getChannelName (pi->getBus (true, 0), i);
                 ins->add (name.isNotEmpty() ? name : TRANS("Unnamed"));
             }
         }
 
         if (outs != nullptr)
         {
-            const int num = pluginInstance->getTotalNumOutputChannels();
+            const int num = pi->getTotalNumOutputChannels();
 
             for (int i = 0; i < num; ++i)
             {
-                auto name = getChannelName (pluginInstance->getBus (false, 0), i);
+                auto name = getChannelName (pi->getBus (false, 0), i);
                 outs->add (name.isNotEmpty() ? name : TRANS("Unnamed"));
             }
         }
@@ -1518,13 +1535,17 @@ void ExternalPlugin::getChannelNames (juce::StringArray* ins,
 bool ExternalPlugin::noTail()
 {
     CRASH_TRACER_PLUGIN (getDebugName());
-    return pluginInstance == nullptr || pluginInstance->getTailLengthSeconds() <= 0.0;
+    return getTailLength() <= 0.0;
 }
 
 double ExternalPlugin::getTailLength() const
 {
     CRASH_TRACER_PLUGIN (getDebugName());
-    return pluginInstance ? pluginInstance->getTailLengthSeconds() : 0.0;
+
+    if (auto pi = getAudioPluginInstance())
+        return pi->getTailLengthSeconds();
+
+    return 0.0;
 }
 
 //==============================================================================
@@ -1549,12 +1570,18 @@ juce::String ExternalPlugin::getSelectableDescription()
 //==============================================================================
 int ExternalPlugin::getNumPrograms() const
 {
-    return pluginInstance ? pluginInstance->getNumPrograms() : 0;
+    if (auto pi = getAudioPluginInstance())
+        return pi->getNumPrograms();
+
+    return 0;
 }
 
 int ExternalPlugin::getCurrentProgram() const
 {
-    return pluginInstance ? pluginInstance->getCurrentProgram() : 0;
+    if (auto pi = getAudioPluginInstance())
+        return pi->getCurrentProgram();
+
+    return 0;
 }
 
 juce::String ExternalPlugin::getProgramName (int index)
@@ -1562,8 +1589,8 @@ juce::String ExternalPlugin::getProgramName (int index)
     if (index == getCurrentProgram())
         return getCurrentProgramName();
 
-    if (pluginInstance != nullptr)
-        return pluginInstance->getProgramName (index);
+    if (auto pi = getAudioPluginInstance())
+        return pi->getProgramName (index);
 
     return {};
 }
@@ -1573,8 +1600,8 @@ bool ExternalPlugin::hasNameForMidiNoteNumber (int note, int midiChannel, juce::
     ignoreUnused (note, midiChannel, name);
    #if TRACKTION_JUCE
     if (takesMidiInput())
-        if (pluginInstance != nullptr)
-            return pluginInstance->hasNameForMidiNoteNumber (note, midiChannel, name);
+        if (auto pi = getAudioPluginInstance())
+            return pi->hasNameForMidiNoteNumber (note, midiChannel, name);
    #endif
 
     return false;
@@ -1609,29 +1636,34 @@ juce::String ExternalPlugin::getNumberedProgramName (int i)
 
 juce::String ExternalPlugin::getCurrentProgramName()
 {
-    return pluginInstance ? pluginInstance->getProgramName (pluginInstance->getCurrentProgram())
-                          : juce::String();
+    if (auto pi = getAudioPluginInstance())
+        return pi->getProgramName (pi->getCurrentProgram());
+
+    return {};
 }
 
 void ExternalPlugin::setCurrentProgramName (const juce::String& name)
 {
     CRASH_TRACER_PLUGIN (getDebugName());
 
-    if (pluginInstance != nullptr)
-        pluginInstance->changeProgramName (pluginInstance->getCurrentProgram(), name);
+    if (auto pi = getAudioPluginInstance())
+        pi->changeProgramName (pi->getCurrentProgram(), name);
 }
 
 void ExternalPlugin::setCurrentProgram (int index, bool sendChangeMessage)
 {
-    if (pluginInstance != nullptr && getNumPrograms() > 0)
+    if (auto pi = getAudioPluginInstance())
     {
+        if (getNumPrograms() == 0)
+            return;
+
         CRASH_TRACER_PLUGIN (getDebugName());
 
         index = juce::jlimit (0, getNumPrograms() - 1, index);
 
         if (index != getCurrentProgram())
         {
-            pluginInstance->setCurrentProgram (index);
+            pi->setCurrentProgram (index);
             state.setProperty (IDs::programNum, index, nullptr);
 
             if (sendChangeMessage)
@@ -1645,12 +1677,15 @@ void ExternalPlugin::setCurrentProgram (int index, bool sendChangeMessage)
 
 bool ExternalPlugin::takesMidiInput()
 {
-    return pluginInstance && pluginInstance->acceptsMidi();
+    if (auto pi = getAudioPluginInstance())
+        return pi->acceptsMidi();
+
+    return false;
 }
 
 bool ExternalPlugin::isMissing()
 {
-    return ! isDisabled() && pluginInstance == nullptr;
+    return ! isDisabled() && ! hasLoadedInstance && ! isAsyncInitialising;
 }
 
 bool ExternalPlugin::isDisabled()
@@ -1658,12 +1693,25 @@ bool ExternalPlugin::isDisabled()
     return engine.getEngineBehaviour().isPluginDisabled (identiferString);
 }
 
-int ExternalPlugin::getNumInputs() const     { return pluginInstance ? pluginInstance->getTotalNumInputChannels() : 0; }
-int ExternalPlugin::getNumOutputs() const    { return pluginInstance ? pluginInstance->getTotalNumOutputChannels() : 0; }
+int ExternalPlugin::getNumInputs() const
+{
+    if (auto pi = getAudioPluginInstance())
+        return pi->getTotalNumInputChannels();
+
+    return 0;
+}
+
+int ExternalPlugin::getNumOutputs() const
+{
+    if (auto pi = getAudioPluginInstance())
+        return pi->getTotalNumOutputChannels();
+
+    return 0;
+}
 
 bool ExternalPlugin::setBusesLayout (juce::AudioProcessor::BusesLayout layout)
 {
-    if (pluginInstance != nullptr)
+    if (auto pi = getAudioPluginInstance())
     {
         std::unique_ptr<Edit::ScopedRenderStatus> srs;
 
@@ -1674,10 +1722,10 @@ bool ExternalPlugin::setBusesLayout (juce::AudioProcessor::BusesLayout layout)
 
         // We need to release resources before changing the bus layout
         // prepareToPlay will be called when the above ScopedRenderStatus goes out of scope
-        pluginInstance->releaseResources();
+        pi->releaseResources();
         isInstancePrepared = false;
 
-        if (pluginInstance->setBusesLayout (layout))
+        if (pi->setBusesLayout (layout))
         {
             if (! edit.isLoading())
             {
@@ -1696,9 +1744,9 @@ bool ExternalPlugin::setBusesLayout (juce::AudioProcessor::BusesLayout layout)
 
 bool ExternalPlugin::setBusLayout (juce::AudioChannelSet set, bool isInput, int busIndex)
 {
-    if (pluginInstance != nullptr)
+    if (auto pi = getAudioPluginInstance())
     {
-        if (auto bus = pluginInstance->getBus (isInput, busIndex))
+        if (auto bus = pi->getBus (isInput, busIndex))
         {
             std::unique_ptr<Edit::ScopedRenderStatus> srs;
 
@@ -1707,7 +1755,7 @@ bool ExternalPlugin::setBusLayout (juce::AudioChannelSet set, bool isInput, int 
 
             // We need to release resources before changing the bus layout
             // prepareToPlay will be called when the above ScopedRenderStatus goes out of scope
-            pluginInstance->releaseResources();
+            pi->releaseResources();
             isInstancePrepared = false;
 
             jassert (baseClassNeedsInitialising());
@@ -1731,50 +1779,94 @@ bool ExternalPlugin::setBusLayout (juce::AudioChannelSet set, bool isInput, int 
 }
 
 //==============================================================================
-void ExternalPlugin::createPluginInstance (const juce::PluginDescription& description)
+void ExternalPlugin::startPluginInstanceCreation (const juce::PluginDescription& description)
 {
-    jassert (! pluginInstance); // This should have already been deleted!
+   #if JUCE_DEBUG
+    jassert (! hasLoadedInstance); // This should have already been deleted!
+   #endif
 
     auto& dm = engine.getDeviceManager();
-  
-    isCreatingInstance = true;
 
     if (requiresAsyncInstantiation (engine, description))
     {
-        // Acquire a weak reference to this Selectable : the plugin might be deleted before the lambda is called
-        auto safeThis = makeSafeRef(*this);
+        isAsyncInitialising = true;
+
+        // The plugin might be deleted before the instance is created so use a weak-ref
         engine.getPluginManager().pluginFormatManager
-          .createPluginInstanceAsync (description, dm.getSampleRate(), dm.getBlockSize(),
-                                      [safeThis] (auto instance, const auto& err) -> void {
-            if (safeThis)
-            {
-                safeThis->loadError = err;
-                safeThis->pluginInstance = std::move (instance);
-                safeThis->completePluginInitialisation();
-                
-                // We need to initialise the plugin again, manually.
-                auto& dev_manager = safeThis->engine.getDeviceManager();
-                PluginInitialisationInfo info { TimePosition(), dev_manager.getSampleRate(), dev_manager.getBlockSize() };
-                safeThis->baseClassInitialise (info);
-                safeThis->initialise (info);
-                safeThis->isCreatingInstance = false;
-            }
-          });
+            .createPluginInstanceAsync (description, dm.getSampleRate(), dm.getBlockSize(),
+                                        [ep = makeSafeRef (*this)]
+                                        (auto instance, auto err)
+                                        {
+                                            if (! ep)
+                                                return;
+
+                                            ep->loadError = err;
+                                            ep->completePluginInstanceCreation (std::move (instance));
+
+                                            // Trigger any status messages to be updated
+                                            ep->changed();
+
+                                            // If we call restartPlayback without clearing the sampleRate and blockSize,
+                                            // the plugin won't get fully initialised which we need in order for
+                                            // prepareToPlay to be called
+                                            ep->sampleRate = {};
+                                            ep->blockSizeSamples = {};
+                                            ep->edit.restartPlayback();
+                                        });
     }
     else
     {
-        juce::String error;
-        pluginInstance = engine.getPluginManager().createPluginInstance (description, dm.getSampleRate(), dm.getBlockSize(), error);
-        loadError = error;
-        completePluginInitialisation();
-        isCreatingInstance = false;
+        if (auto newInstance = engine.getPluginManager().createPluginInstance (description,
+                                                                               dm.getSampleRate(), dm.getBlockSize(),
+                                                                               loadError))
+        {
+            completePluginInstanceCreation (std::move (newInstance));
+        }
     }
+}
+
+void ExternalPlugin::completePluginInstanceCreation (std::unique_ptr<juce::AudioPluginInstance> newInstance)
+{
+    if (! newInstance)
+    {
+        TRACKTION_LOG_ERROR (loadError);
+        return;
+    }
+
+    newInstance->enableAllBuses();
+    loadedInstance = LoadedInstance::create (*this, std::move (newInstance));
+    hasLoadedInstance = true;
+    isAsyncInitialising = false;
+
+    auto pi = getAudioPluginInstance();
+
+   #if JUCE_PLUGINHOST_VST
+    if (auto xml = juce::VSTPluginFormat::getVSTXML (pi))
+        vstXML.reset (VSTXML::createFor (*xml));
+
+    juce::VSTPluginFormat::setExtraFunctions (pi, new ExtraVSTCallbacks (edit));
+   #endif
+
+    pi->setPlayHead (playhead.get());
+    supportsMPE = pi->supportsMPE();
+
+    engine.getEngineBehaviour().doAdditionalInitialisation (*this);
+
+    restorePluginStateFromValueTree (state);
+    buildParameterList();
+    restoreChannelLayout (*this);
 }
 
 void ExternalPlugin::deletePluginInstance()
 {
-    processorChangedManager.reset();
-    AsyncPluginDeleter::getInstance()->deletePlugin (pluginInstance.release());
+    TRACKTION_ASSERT_MESSAGE_THREAD
+    hasLoadedInstance = false;
+    isAsyncInitialising = false;
+    loadError = {};
+
+    if (loadedInstance)
+        if (auto pi = loadedInstance->releaseInstance())
+            AsyncPluginDeleter::getInstance()->deletePlugin (std::move (pi));
 }
 
 //==============================================================================
@@ -1786,8 +1878,11 @@ void ExternalPlugin::buildParameterTree() const
         return;
 
     CRASH_TRACER_PLUGIN (getDebugName());
-    paramTree.rootNode->addSubNode (new AutomatableParameterTree::TreeNode (getAutomatableParameter (0)));
-    paramTree.rootNode->addSubNode (new AutomatableParameterTree::TreeNode (getAutomatableParameter (1)));
+    if (auto p1 = getAutomatableParameter (0))
+        paramTree.rootNode->addSubNode (new AutomatableParameterTree::TreeNode (p1));
+
+    if (auto p2 = getAutomatableParameter (0))
+        paramTree.rootNode->addSubNode (new AutomatableParameterTree::TreeNode (p2));
 
     juce::SortedSet<int> paramsInTree;
 
@@ -1851,7 +1946,10 @@ void ExternalPlugin::deleteFromParent()
 
 juce::AudioPluginInstance* ExternalPlugin::getAudioPluginInstance() const
 {
-    return pluginInstance.get();
+    if (! hasLoadedInstance)
+        return {};
+
+    return &loadedInstance->getInstance();
 }
 
 void ExternalPlugin::valueTreePropertyChanged (juce::ValueTree& v, const juce::Identifier& id)
@@ -1883,6 +1981,112 @@ juce::Array<Exportable::ReferencedItem> ExternalPlugin::getReferencedItems()
 void ExternalPlugin::reassignReferencedItem (const ReferencedItem& itm, ProjectItemID newID, double newStartTime)
 {
     engine.getEngineBehaviour().reassignReferencedItem (*this, itm, newID, newStartTime);
+}
+
+
+//==============================================================================
+struct AudioProcessorEditorContentComp  : public Plugin::EditorComponent
+{
+    AudioProcessorEditorContentComp (ExternalPlugin& plug) : plugin (plug)
+    {
+        JUCE_AUTORELEASEPOOL
+        {
+            if (auto inst = plugin.getAudioPluginInstance())
+            {
+                editor.reset (inst->createEditorIfNeeded());
+
+                if (editor == nullptr)
+                    return;
+
+                addAndMakeVisible (*editor);
+            }
+        }
+
+        resizeToFitEditor (true);
+    }
+
+    bool allowWindowResizing() override
+    {
+        if (isCmajorPatchPluginFormat (plugin.desc))
+            return editor != nullptr && editor->isResizable();
+
+        // Allowing this for VSTs results in some hard-to-prevent size hysteresis..
+        return plugin.isVST3()
+                && plugin.getVendor().containsIgnoreCase ("Celemony");
+    }
+
+    juce::ComponentBoundsConstrainer* getBoundsConstrainer() override
+    {
+        if (editor != nullptr)
+            return editor->getConstrainer();
+
+        return {};
+    }
+
+    void resized() override
+    {
+        if (editor != nullptr)
+            editor->setBounds (getLocalBounds());
+    }
+
+    void childBoundsChanged (juce::Component* c) override
+    {
+        if (c == editor.get())
+        {
+            plugin.edit.pluginChanged (plugin);
+            resizeToFitEditor (false);
+        }
+    }
+
+    void resizeToFitEditor (bool force)
+    {
+        if (force || ! allowWindowResizing())
+        {
+            setSize (std::max (8, editor != nullptr ? editor->getWidth() : 0),
+                     std::max (8, editor != nullptr ? editor->getHeight() : 0));
+        }
+    }
+
+    void visibilityChanged() override
+    {
+        if (editor != nullptr && isShowing())
+        {
+            if (editor->isShowing())
+                editor->grabKeyboardFocus();
+
+            editor->toFront (true);
+        }
+    }
+
+    ExternalPlugin& plugin;
+    std::unique_ptr<juce::AudioProcessorEditor> editor;
+
+    AudioProcessorEditorContentComp() = delete;
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioProcessorEditorContentComp)
+};
+
+std::unique_ptr<Plugin::EditorComponent> ExternalPlugin::createEditor()
+{
+    auto ed = std::make_unique<AudioProcessorEditorContentComp> (*this);
+
+    if (ed->editor != nullptr)
+        return ed;
+
+    return {};
+}
+
+//==============================================================================
+bool ExternalPlugin::requiresAsyncInstantiation (Engine& e, const juce::PluginDescription& d)
+{
+    for (auto format : e.getPluginManager().pluginFormatManager.getFormats())
+    {
+        if (format->getName() == d.pluginFormatName
+            && format->fileMightContainThisPluginType (d.fileOrIdentifier)
+            && format->requiresUnblockedMessageThreadDuringCreation (d))
+           return true;
+    }
+
+    return false;
 }
 
 //==============================================================================

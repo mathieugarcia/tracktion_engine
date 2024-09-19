@@ -1,6 +1,6 @@
 /*
     ,--.                     ,--.     ,--.  ,--.
-  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2018
+  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2024
   '-.  .-'|  .--' ,-.  | .--'|     /'-.  .-',--.| .-. ||      \   Tracktion Software
     |  |  |  |  \ '-'  \ `--.|  \  \  |  |  |  |' '-' '|  ||  |       Corporation
     `---' `--'   `--`--'`---'`--'`--' `---' `--' `---' `--''--'    www.tracktion.com
@@ -11,6 +11,8 @@
 namespace tracktion { inline namespace engine
 {
 
+//==========================================================================
+//==========================================================================
 class EditPlaybackContext
 {
 public:
@@ -27,7 +29,7 @@ public:
     void createPlayAudioNodes (TimePosition startTime);
     void createPlayAudioNodesIfNeeded (TimePosition startTime);
     void reallocate();
-    
+
     /** Returns true if a playback graph is currently allocated. */
     bool isPlaybackGraphAllocated() const       { return isAllocated; }
 
@@ -38,9 +40,9 @@ public:
     // Plays this context in sync with another context
     void syncToContext (EditPlaybackContext* contextToSyncTo, TimePosition previousBarTime, TimeDuration syncInterval);
 
-    Clip::Array stopRecording (InputDeviceInstance&, TimeRange recordedRange, bool discardRecordings);
-    Clip::Array recordingFinished (TimeRange recordedRange, bool discardRecordings);
-    juce::Result applyRetrospectiveRecord (juce::Array<Clip*>* clipsCreated = nullptr);
+    tl::expected<Clip::Array, juce::String> stopRecording (InputDeviceInstance&, bool discardRecordings);
+    tl::expected<Clip::Array, juce::String> stopRecording (TimePosition unloopedEnd, bool discardRecordings);
+    juce::Result applyRetrospectiveRecord (juce::Array<Clip*>* clipsCreated = nullptr, bool armedOnly = false);
 
     juce::Array<InputDeviceInstance*> getAllInputs();
     InputDeviceInstance* getInputFor (InputDevice*) const;
@@ -62,10 +64,6 @@ public:
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ScopedDeviceListReleaser)
     };
-
-    // This is a global setting
-    static bool shouldAddAntiDenormalisationNoise (Engine&);
-    static void setAddAntiDenormalisationNoise (Engine&, bool);
 
     //==============================================================================
     /**
@@ -89,7 +87,7 @@ public:
     TimePosition getPosition() const;
     TimePosition getUnloopedPosition() const;
     TimeRange getLoopTimes() const;
-    
+
     /** Returns the overall latency of the currently prepared graph. */
     int getLatencySamples() const;
     TimePosition getAudibleTimelineTime();
@@ -119,7 +117,15 @@ public:
 
     void play();
     void stop();
-    
+
+    /** Posts a transport position change so play can be synconrised with the next block. */
+    void postPlay();
+    /** Returns true if a play message has been posted but not dispatched. */
+    bool isPlayPending() const;
+
+    /** Returns the last reference sample position and the edit time and beat that it corresponded to. */
+    std::optional<SyncPoint> getSyncPoint() const;
+
     TimePosition globalStreamTimeToEditTime (double) const;
     TimePosition globalStreamTimeToEditTimeUnlooped (double) const;
     void resyncToGlobalStreamTime (juce::Range<double>, double sampleRate);
@@ -127,15 +133,36 @@ public:
     /** @internal. Will be removed in a future release. */
     tracktion::graph::PlayHead* getNodePlayHead() const;
 
+    /** @internal */
+    void blockUntilSyncPointChange();
+
     /** @see tracktion::graph::ThreadPoolStrategy */
     static void setThreadPoolStrategy (int);
     /** @see tracktion::graph::ThreadPoolStrategy */
     static int getThreadPoolStrategy();
-    
+
     /** Enables reusing of audio buffers during graph processing
         which may reduce the memory use at the cost of some additional overhead.
     */
     static void enablePooledMemory (bool);
+
+    /** Enables reusing of audio buffers during graph processing
+        which may reduce the memory use at the cost of some additional overhead.
+        N.B. This is different from enablePooledMemory.
+    */
+    static void enableNodeMemorySharing (bool);
+
+    /** Enables using AudioWorkgroups.
+        Currently experimental and only on macOS.
+    */
+    static void enableAudioWorkgroup (bool);
+
+    /** @internal */
+    int getNumActivelyRecordingDevices() const;
+    /** @internal */
+    void incrementNumActivelyRecordingDevices();
+    /** @internal */
+    void decrementNumActivelyRecordingDevices();
 
 private:
     bool isAllocated = false;
@@ -158,7 +185,7 @@ private:
     void rebuildDeviceList();
 
     void prepareOutputDevices (TimePosition start);
-    void startRecording (TimePosition start, TimePosition punchIn);
+    juce::Result startRecording (TimePosition start, TimePosition punchIn);
     void startPlaying (TimePosition start);
 
     friend class DeviceManager;
@@ -168,21 +195,45 @@ private:
     TimeDuration syncInterval;
     bool hasSynced = false;
     double lastStreamPos = 0;
-    
+
     struct ContextSyncroniser;
     std::unique_ptr<ContextSyncroniser> contextSyncroniser;
-    
+
     struct NodePlaybackContext;
     std::unique_ptr<NodePlaybackContext> nodePlaybackContext;
 
     juce::WeakReference<EditPlaybackContext> nodeContextToSyncTo;
     std::atomic<double> audiblePlaybackTime { 0.0 };
+    std::atomic<int> activelyRecordingInputDevices { 0 };
 
     void createNode();
+    void nextBlockStarted();
     void fillNextNodeBlock (float* const* allChannels, int numChannels, int numSamples);
 
     JUCE_DECLARE_WEAK_REFERENCEABLE (EditPlaybackContext)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EditPlaybackContext)
 };
+
+//==============================================================================
+//==============================================================================
+/** @internal */
+namespace detail
+{
+    /** @internal */
+    struct ScopedActiveRecordingDevice
+    {
+        ScopedActiveRecordingDevice (EditPlaybackContext& e) : epc (e)
+        {
+            epc.incrementNumActivelyRecordingDevices();
+        }
+
+        ~ScopedActiveRecordingDevice()
+        {
+            epc.decrementNumActivelyRecordingDevices();
+        }
+
+        EditPlaybackContext& epc;
+    };
+}
 
 }} // namespace tracktion { inline namespace engine

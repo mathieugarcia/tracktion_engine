@@ -1,6 +1,6 @@
 /*
     ,--.                     ,--.     ,--.  ,--.
-  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2018
+  ,-'  '-.,--.--.,--,--.,---.|  |,-.,-'  '-.`--' ,---. ,--,--,      Copyright 2024
   '-.  .-'|  .--' ,-.  | .--'|     /'-.  .-',--.| .-. ||      \   Tracktion Software
     |  |  |  |  \ '-'  \ `--.|  \  \  |  |  |  |' '-' '|  ||  |       Corporation
     `---' `--'   `--`--'`---'`--'`--' `---' `--' `---' `--''--'    www.tracktion.com
@@ -44,7 +44,6 @@ int MidiModifierPlugin::getNumOutputChannelsGivenInputs (int)                   
 void MidiModifierPlugin::getChannelNames (juce::StringArray*, juce::StringArray*)  {}
 bool MidiModifierPlugin::takesAudioInput()                                         { return false; }
 bool MidiModifierPlugin::canBeAddedToClip()                                        { return false; }
-bool MidiModifierPlugin::needsConstantBufferSize()                                 { return false; }
 
 void MidiModifierPlugin::applyToBuffer (const PluginRenderContext& fc)
 {
@@ -59,8 +58,7 @@ juce::String MidiModifierPlugin::getSelectableDescription()
 
 void MidiModifierPlugin::restorePluginStateFromValueTree (const juce::ValueTree& v)
 {
-    juce::CachedValue<float>* cvsFloat[]  = { &semitonesValue, nullptr };
-    copyPropertiesToNullTerminatedCachedValues (v, cvsFloat);
+    copyPropertiesToCachedValues (v, semitonesValue);
 
     for (auto p : getAutomatableParameters())
         p->updateFromAttachedValue();
