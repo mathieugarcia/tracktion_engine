@@ -46,6 +46,7 @@ struct RackType::RackPluginList  : public ValueTreeObjectList<RackType::PluginIn
         : ValueTreeObjectList<PluginInfo> (parentTree), type (t)
     {
         CRASH_TRACER
+        // Exception will be caught by the Edit constructor
         callBlocking ([this] { this->rebuildObjects(); });
     }
 
@@ -151,6 +152,7 @@ struct RackType::WindowStateList  : public ValueTreeObjectList<WindowState>
         : ValueTreeObjectList<WindowState> (t.state), type (t)
     {
         CRASH_TRACER
+        // Exception will be caught by the Edit constructor
         callBlocking ([this] { this->rebuildObjects(); });
     }
 
@@ -1047,35 +1049,16 @@ juce::UndoManager* RackType::getUndoManager() const
     return &edit.getUndoManager();
 }
 
-void RackType::countInstancesInEdit()
-{
-    CRASH_TRACER
-    TRACKTION_ASSERT_MESSAGE_THREAD
-
-    numberOfInstancesInEdit = 0;
-
-    for (auto p : getAllPlugins (edit, false))
-        if (auto rf = dynamic_cast<RackInstance*> (p))
-            if (rf->type.get() == this)
-                ++numberOfInstancesInEdit;
-}
-
 //==============================================================================
 void RackType::registerInstance (RackInstance* instance, const PluginInitialisationInfo&)
 {
     CRASH_TRACER
     activeRackInstances.addIfNotAlreadyThere (instance);
-    numActiveInstances.store (activeRackInstances.size());
-
-    countInstancesInEdit();
 }
 
 void RackType::deregisterInstance (RackInstance* instance)
 {
     activeRackInstances.removeAllInstancesOf (instance);
-    numActiveInstances.store (activeRackInstances.size());
-
-    countInstancesInEdit();
 }
 
 void RackType::updateAutomatableParamPositions (TimePosition time)
@@ -1264,16 +1247,21 @@ void RackTypeList::initialise (const juce::ValueTree& v)
     list->rebuildObjects();
 }
 
+bool RackTypeList::isInitialised() const
+{
+    return list != nullptr;
+}
+
 RackTypeList::~RackTypeList()
 {
-    for (auto t : list->objects)
-        t->hideWindowForShutdown();
-
-    list = nullptr;
+    if (list)
+        for (auto t : list->objects)
+            t->hideWindowForShutdown();
 }
 
 const juce::Array<RackType*>& RackTypeList::getTypes() const noexcept
 {
+    assert (isInitialised());
     return list->objects;
 }
 
@@ -1419,8 +1407,6 @@ void RackType::triggerUpdate()
 
     if (edit.isLoading())
         return;
-
-    countInstancesInEdit();
 
     edit.restartPlayback();
 }

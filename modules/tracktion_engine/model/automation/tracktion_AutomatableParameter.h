@@ -75,9 +75,6 @@ public:
     std::function<juce::String(float)> valueToStringFunction;
     std::function<float(const juce::String&)> stringToValueFunction;
 
-    virtual void beginParameterChangeGesture() {}
-    virtual void endParameterChangeGesture() {}
-
     // should be called to change a parameter when a user is actively moving it
     void setParameter (float value, juce::NotificationType);
     void setNormalisedParameter (float value, juce::NotificationType);
@@ -126,11 +123,15 @@ public:
     */
     ModifierAssignment::Ptr addModifier (ModifierSource&, float value = 1.0f, float offset = 0.0f, float curve = 0.5f);
 
-    /** Removes an assignment. N.B. the passed in assignment is likely to be deleted after this call. */
-    void removeModifier (ModifierAssignment&);
+    /** Removes an assignment. N.B. the passed in assignment is likely to be deleted after this call.
+        @returns true if the ModifierAssignment was removed
+    */
+    bool removeModifier (ModifierAssignment&);
 
-    /** Removes assignments for a ModifierSource. */
-    void removeModifier (ModifierSource&);
+    /** Removes assignments for a ModifierSource.
+        @returns true if the ModifierSource was removed
+    */
+    bool removeModifier (ModifierSource&);
 
     /** Returns true if any ModifierSources are currently in use by assignments. */
     bool hasActiveModifierAssignments() const;
@@ -186,9 +187,6 @@ public:
     /** true if the parameter been moved while in an automation record mode. */
     bool isCurrentlyRecording() const                               { return isRecording; }
 
-    /** this is called before and after playback or recording. */
-    void resetRecordingStatus();
-
     //==============================================================================
     // called by ParameterControlMappings
     void midiControllerMoved (float newPosition);
@@ -221,10 +219,27 @@ public:
         virtual void parameterChanged (AutomatableParameter&, float /*newValue*/) {}
         virtual void parameterChangeGestureBegin (AutomatableParameter&) {}
         virtual void parameterChangeGestureEnd (AutomatableParameter&) {}
+
+        /** Called when this parameter starts or stops recording. */
+        virtual void recordingStatusChanged (AutomatableParameter&) {}
     };
 
     void addListener (Listener* l)              { listeners.add (l); }
     void removeListener (Listener* l)           { listeners.remove (l); }
+
+    /** @internal */
+    struct ScopedActiveParameter
+    {
+        ScopedActiveParameter (const AutomatableParameter&);
+        ~ScopedActiveParameter();
+
+        const AutomatableParameter& parameter;
+    };
+
+    /** @internal */
+    void resetRecordingStatus();
+    /** @internal */
+    void startRecordingStatus();
 
 protected:
     struct AttachedValue;
@@ -240,9 +255,11 @@ protected:
     MacroParameterList* macroOwner = nullptr;
     std::unique_ptr<AutomationCurveSource> curveSource;
     std::atomic<float> currentValue { 0.0f }, currentParameterValue { 0.0f },  currentBaseValue { 0.0f }, currentModifierValue { 0.0f };
+    mutable std::atomic<int> numActiveAutomationSources { 0 };
     std::atomic<bool> isRecording { false };
     bool updateParametersRecursionCheck = false;
     AsyncCaller parameterChangedCaller { [this] { listeners.call (&Listener::currentValueChanged, *this); } };
+    int gestureCount = 0;
 
     juce::ValueTree modifiersState;
     struct AutomationSourceList;
@@ -266,6 +283,9 @@ protected:
 
 
 //==============================================================================
+/** Looks for the Track this parameter is currently on and returns the AutomationMode for it. */
+AutomationMode getAutomationMode (const AutomatableParameter&);
+
 /** Returns all the Assignments of a specific type. */
 template<typename AssignmentType>
 juce::ReferenceCountedArray<AssignmentType> getAssignmentsOfType (const AutomatableParameter& ap)
@@ -392,35 +412,34 @@ public:
 
 
 //==============================================================================
-// A pre-rendered set of interpolated points along a curve, with a cursor which moves through it.
+/**
+    A cache of automation points, with a cursor which moves through it.
+*/
 struct AutomationIterator
 {
+    AutomationIterator (Edit&, const AutomationCurve&);
     AutomationIterator (const AutomatableParameter&);
 
     bool isEmpty() const noexcept               { return points.size() <= 1; }
 
-    void setPosition (TimePosition) noexcept;
+    void setPosition (EditPosition) noexcept;
     float getCurrentValue() noexcept            { return currentValue; }
 
 private:
-    void interpolate (const AutomatableParameter&);
-    void copy (const AutomatableParameter&);
-    int updateIndex (TimePosition newTime);
-
-    void setPositionHiRes (TimePosition newTime) noexcept;
-    void setPositionInterpolated (TimePosition newTime) noexcept;
+    int updateIndex (double position);
 
     struct AutoPoint
     {
-        TimePosition time = 0_tp;
+        double time = 0.0; // Could be time or beats depending on the curve's timeBase
         float value = 0.0f;
         float curve = 0.0f;
     };
 
+    const tempo::Sequence& tempoSequence;
     juce::Array<AutoPoint> points;
     int currentIndex = -1;
     float currentValue = 0.0f;
-    bool hiRes = false;
+    const AutomationCurve::TimeBase timeBase;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AutomationIterator)
 };

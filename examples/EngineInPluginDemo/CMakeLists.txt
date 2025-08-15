@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.15)
 
 set (TARGET_NAME EngineInPluginDemo)
 
+set_directory_properties(PROPERTIES
+    JUCE_COMPANY_WEBSITE "https://tracktion.com")
+
 if (DEFINED PROJECT_NAME)
     message ("Adding ${TARGET_NAME} to the ${PROJECT_NAME} project")
 else()
@@ -100,9 +103,14 @@ endif()
 
 # Add custom target to avoid building LV2 which is broken with PIP sources
 add_custom_target(${TARGET_NAME}_common)
+
 add_dependencies(${TARGET_NAME}_common
-    ${TARGET_NAME}_VST3
     ${TARGET_NAME}_Standalone)
+
+if (NOT ${CMAKE_SYSTEM_NAME} MATCHES "iOS")
+    add_dependencies(${TARGET_NAME}_common
+        ${TARGET_NAME}_VST3)
+endif()
 
 if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
     add_dependencies(${TARGET_NAME}_common

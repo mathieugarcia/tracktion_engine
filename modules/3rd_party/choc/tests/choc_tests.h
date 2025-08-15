@@ -19,7 +19,9 @@
 #ifndef CHOC_TESTS_HEADER_INCLUDED
 #define CHOC_TESTS_HEADER_INCLUDED
 
+#include "../platform/choc_BuildDate.h"
 #include "../containers/choc_ZipFile.h"
+#include "../platform/choc_Execute.h"
 #include "../platform/choc_FileWatcher.h"
 #include "../threading/choc_ThreadSafeFunctor.h"
 #include "../threading/choc_TaskThread.h"
@@ -101,6 +103,8 @@ namespace choc_unit_tests
 /// to log its progress.
 bool runAllTests (choc::test::TestProgress&);
 
+/// Performs the setup function, then waits for it to call the exit function provided,
+/// then calls handleResult
 static void runTestOnMessageThread (std::function<void(const std::function<void()>&)> setup,
                                     std::function<void()> handleResult = {})
 {
@@ -138,6 +142,13 @@ inline void testPlatform (choc::test::TestProgress& progress)
     {
         CHOC_TEST (DetectDebugger)
         CHOC_EXPECT_FALSE (choc::isDebuggerActive());
+    }
+
+    {
+        CHOC_TEST (BuildDate)
+        // For the purpose of testing, we'll assume you always do a fresh build
+        // before running this.
+        CHOC_EXPECT_TRUE (choc::getDaysSinceBuildDate() < 5);
     }
 
     {
@@ -757,6 +768,16 @@ inline void testValues (choc::test::TestProgress& progress)
         catch (choc::value::Error& e)
         {
             CHOC_EXPECT_EQ (e.description, std::string ("Index out of range"));
+        }
+
+        try
+        {
+            auto o = choc::value::createObject (std::string_view ("xx\0x", 4u));
+            CHOC_FAIL ("Failed to fail");
+        }
+        catch (choc::value::Error& e)
+        {
+            CHOC_EXPECT_EQ (e.description, std::string ("Object names may not contain a null character"));
         }
     }
 
@@ -2405,6 +2426,38 @@ inline void testWebview (choc::test::TestProgress& progress)
         {
             choc::ui::WebView::Options opts;
             opts.enableDebugMode = true;
+
+            opts.webviewIsReady = [&] (choc::ui::WebView& w)
+            {
+                w.bind ("succeeded", [&] (const choc::value::ValueView& args)
+                {
+                    result = choc::json::toString (args);
+                    finished();
+                    return choc::value::Value();
+                });
+
+                w.evaluateJavascript ("let a = { x: [1, 2, 3], y: 987.0, z: true }; a", [&] (const std::string& error, const choc::value::ValueView& value)
+                {
+                    error1 = error; value1 = value;
+                });
+
+                w.evaluateJavascript ("return 1234;", [&] (const std::string& error, const choc::value::ValueView& value)
+                {
+                    error2 = error; value2 = value;
+                });
+
+                w.evaluateJavascript ("", [&] (const std::string& error, const choc::value::ValueView& value)
+                {
+                    error3 = error; value3 = value;
+                });
+
+                timer = choc::messageloop::Timer (200, [&]
+                {
+                    w.evaluateJavascript ("succeeded (1234, 5678);");
+                    return false;
+                });
+            };
+
             webview = std::make_unique<choc::ui::WebView> (opts);
 
             if (! webview->loadedOK())
@@ -2414,34 +2467,6 @@ inline void testWebview (choc::test::TestProgress& progress)
                 finished();
                 return;
             }
-
-            webview->bind ("succeeded", [&] (const choc::value::ValueView& args)
-            {
-                result = choc::json::toString (args);
-                finished();
-                return choc::value::Value();
-            });
-
-            webview->evaluateJavascript ("let a = { x: [1, 2, 3], y: 987.0, z: true }; a", [&] (const std::string& error, const choc::value::ValueView& value)
-            {
-                error1 = error; value1 = value;
-            });
-
-            webview->evaluateJavascript ("return 1234;", [&] (const std::string& error, const choc::value::ValueView& value)
-            {
-                error2 = error; value2 = value;
-            });
-
-            webview->evaluateJavascript ("", [&] (const std::string& error, const choc::value::ValueView& value)
-            {
-                error3 = error; value3 = value;
-            });
-
-            timer = choc::messageloop::Timer (200, [&]
-            {
-                webview->evaluateJavascript ("succeeded (1234, 5678);");
-                return false;
-            });
         },
         [&] { webview.reset(); timer = {}; });
 
@@ -2451,7 +2476,9 @@ inline void testWebview (choc::test::TestProgress& progress)
         CHOC_EXPECT_EQ (result, "[1234, 5678]");
         CHOC_EXPECT_TRUE (error1.empty());
         CHOC_EXPECT_EQ (choc::json::toString (value1), R"({"x": [1, 2, 3], "y": 987, "z": true})");
-        CHOC_EXPECT_TRUE (! error2.empty());
+       #if ! CHOC_WINDOWS
+        CHOC_EXPECT_TRUE (! error2.empty()); // Windows browser seems to not do this one correctly
+       #endif
         CHOC_EXPECT_TRUE (value2.isVoid());
         CHOC_EXPECT_TRUE (error3.empty());
         CHOC_EXPECT_TRUE (value3.isVoid());
@@ -2485,21 +2512,24 @@ fetch (new Request("./hello.txt"))
 
         runTestOnMessageThread ([&] (const std::function<void()>& finished)
         {
+            opts.webviewIsReady = [&] (choc::ui::WebView& w)
+            {
+                if (! w.loadedOK())
+                {
+                    std::cout << "WebView was unavailable" << std::endl;
+                    finished();
+                    return;
+                }
+
+                w.bind ("succeeded", [&] (const choc::value::ValueView& args)
+                {
+                    result = choc::json::toString (args);
+                    finished();
+                    return choc::value::Value();
+                });
+            };
+
             webview = std::make_unique<choc::ui::WebView> (opts);
-
-            if (! webview->loadedOK())
-            {
-                std::cout << "WebView was unavailable" << std::endl;
-                finished();
-                return;
-            }
-
-            webview->bind ("succeeded", [&] (const choc::value::ValueView& args)
-            {
-                result = choc::json::toString (args);
-                finished();
-                return choc::value::Value();
-            });
         },
         [&] { webview.reset(); });
 
@@ -2838,8 +2868,8 @@ inline void testThreading (choc::test::TestProgress& progress)
         choc::threading::TaskThread tt1, tt2;
         std::atomic<int> numCallbacks1 { 0 }, numCallbacks2 { 0 };
 
-        tt1.start (100, [&] { ++numCallbacks1; });
-        tt2.start (0,   [&] { ++numCallbacks2; });
+        tt1.start (std::chrono::milliseconds (100), [&] { ++numCallbacks1; });
+        tt2.start (0,                               [&] { ++numCallbacks2; });
 
         std::this_thread::sleep_for (std::chrono::milliseconds (50));
         CHOC_EXPECT_EQ (0, numCallbacks2.load());
@@ -2849,10 +2879,10 @@ inline void testThreading (choc::test::TestProgress& progress)
         {
             std::this_thread::sleep_for (std::chrono::milliseconds (5));
 
-            if (numCallbacks1 == 3)
+            if (numCallbacks1 == 3 && numCallbacks2 == 1)
                 break;
 
-            if (i > 100)
+            if (i > 500)
                 CHOC_FAIL ("Expected some callbacks");
         }
 
@@ -2866,7 +2896,9 @@ inline void testThreading (choc::test::TestProgress& progress)
             choc::threading::ThreadSafeFunctor<std::function<void(int)>> tsf;
 
             int result = 0;
+            CHOC_EXPECT_FALSE (tsf);
             tsf = [&] (int x) { result = x; };
+            CHOC_EXPECT_TRUE (tsf);
             CHOC_EXPECT_TRUE (tsf (2));
             tsf.reset();
             CHOC_EXPECT_FALSE (tsf (3));
@@ -3150,6 +3182,24 @@ static void testZipFile (choc::test::TestProgress& progress)
 }
 
 //==============================================================================
+static void testExecute (choc::test::TestProgress& progress)
+{
+    CHOC_CATEGORY (Exec);
+
+    try
+    {
+        CHOC_TEST (Exec)
+        auto r1 = choc::execute ("echo \"xyz\"", true);
+        CHOC_EXPECT_EQ (r1.statusCode, 0);
+        CHOC_EXPECT_TRUE (choc::text::contains (r1.output, "xyz"));
+
+        auto r2 = choc::execute ("skfgdgj", true);
+        CHOC_EXPECT_NE (r2.statusCode, 0);
+    }
+    CHOC_CATCH_UNEXPECTED_EXCEPTION
+}
+
+//==============================================================================
 static void testHTTPServer (choc::test::TestProgress& progress)
 {
     (void) progress;
@@ -3171,7 +3221,7 @@ static void testHTTPServer (choc::test::TestProgress& progress)
                 [] (boost::beast::websocket::request_type& req)
                 {
                     req.set (boost::beast::http::field::user_agent,
-                        std::string (BOOST_BEAST_VERSION_STRING) + " websocket-client-coro");
+                             std::string (BOOST_BEAST_VERSION_STRING) + " websocket-client-coro");
                 }));
 
             // Perform the websocket handshake
@@ -3236,7 +3286,7 @@ static void testHTTPServer (choc::test::TestProgress& progress)
 
                 // Prepare another read callback to be processed by the thread
                 ws.async_read (destBuffer,
-                            [this] (auto code, auto bytes) { readMessage (code, bytes); });
+                               [this] (auto code, auto bytes) { readMessage (code, bytes); });
             }
         }
     };
@@ -3349,6 +3399,7 @@ inline bool runAllTests (choc::test::TestProgress& progress, bool multithread)
 
     std::function<void(choc::test::TestProgress&)> testFunctions[] =
     {
+        testExecute,
         testHTTPServer,
         testZLIB,
         testZipFile,

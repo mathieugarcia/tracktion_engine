@@ -25,6 +25,8 @@ Track::Track (Edit& ed, const juce::ValueTree& v, bool hasModifierList)
     currentAutoParamPlugin.referTo (state, IDs::currentAutoParamPluginID, um, EditItemID());
     currentAutoParamID.referTo (state, IDs::currentAutoParamTag, um, {});
 
+    automationMode.referTo (state, IDs::automationMode, um, {});
+
     if (hasModifierList)
         modifierList = std::make_unique<ModifierList> (edit, state.getOrCreateChildWithName (IDs::MODIFIERS, um));
 
@@ -445,6 +447,8 @@ bool Track::isAChildOf (const Track& t) const
 void Track::insertSpaceIntoTrack (TimePosition time, TimeDuration amountOfSpace)
 {
     // shift up any automation curves too..
+    auto um = getUndoManager_p (edit);
+
     for (auto p : pluginList)
     {
         for (int j = p->getNumAutomatableParameters(); --j >= 0;)
@@ -452,19 +456,21 @@ void Track::insertSpaceIntoTrack (TimePosition time, TimeDuration amountOfSpace)
             if (auto param = p->getAutomatableParameter (j))
             {
                 auto& curve = param->getCurve();
-                auto valueAtInsertionTime = curve.getValueAt (time);
+                auto defaultValue = param->getCurrentBaseValue();
+                auto valueAtInsertionTime = curve.getValueAt (time, defaultValue);
 
                 for (int k = curve.getNumPoints(); --k >= 0;)
                     if (curve.getPointTime (k) >= time)
-                        curve.movePoint (k,
+                        curve.movePoint (*param, k,
                                          curve.getPointTime (k) + amountOfSpace,
-                                         curve.getPointValue (k), false);
+                                         curve.getPointValue (k), false,
+                                         um);
 
-                if (! juce::approximatelyEqual (valueAtInsertionTime, curve.getValueAt (time)))
-                    curve.addPoint (time, valueAtInsertionTime, 0.0f);
+                if (! juce::approximatelyEqual (valueAtInsertionTime, curve.getValueAt (time, defaultValue)))
+                    curve.addPoint (time, valueAtInsertionTime, 0.0f, um);
 
-                if (! juce::approximatelyEqual (valueAtInsertionTime, curve.getValueAt (time + amountOfSpace)))
-                    curve.addPoint (time + amountOfSpace, valueAtInsertionTime, 0.0f);
+                if (! juce::approximatelyEqual (valueAtInsertionTime, curve.getValueAt (time + amountOfSpace, defaultValue)))
+                    curve.addPoint (time + amountOfSpace, valueAtInsertionTime, 0.0f, um);
             }
         }
     }
@@ -563,6 +569,10 @@ void Track::valueTreePropertyChanged (juce::ValueTree& v, const juce::Identifier
         {
             changed();
             triggerAsyncUpdate();
+        }
+        else if (i == IDs::automationMode)
+        {
+            changed();
         }
         else if (i == IDs::imageIdOrData)
         {

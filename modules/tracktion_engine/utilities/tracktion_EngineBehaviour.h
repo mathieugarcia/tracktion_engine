@@ -136,6 +136,17 @@ public:
     /// 0 = normal, 1 = high, 2 = realtime
     virtual void setProcessPriority (int /*level*/)                                 {}
 
+    /// If implemented, this lets the behaviour determine exactly which file a new
+    /// auto recording for the given track should be made to.
+    virtual juce::File getFileForNewAudioRecording (Track&, const juce::String& fileExtension)  { (void) fileExtension; return {}; }
+
+    /// If this is implemented, this folder will be used for the %project% pattern when
+    /// parsing an audio input device's target filename.
+    virtual juce::File getDefaultFolderForAudioRecordings (Edit&)                   { return {}; }
+
+    /// The default filename that will be used for audio input devices if not overridden
+    virtual juce::String getDefaultAudioRecordingFilePattern()                      { return "%projectdir%/%edit%_%track%_Take_%take%"; }
+
     //==============================================================================
     // Model-related options
 
@@ -216,9 +227,6 @@ public:
 
     /// If this returns true, it means that newly inserted clips will automatically have a fade-in and fade-out of 3ms applied.
     virtual bool autoAddClipEdgeFades()                                             { return false; }
-
-    /// Interpolate automation at 10ms intervals (faster) or calculate actual value (slower)
-    virtual bool interpolateAutomation()                                            { return true; }
 
     struct LevelMeterSettings
     {

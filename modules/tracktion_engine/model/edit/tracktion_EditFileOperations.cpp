@@ -433,9 +433,9 @@ juce::ValueTree loadEditFromProjectManager (ProjectManager& pm, ProjectItemID it
     return {};
 }
 
-std::unique_ptr<Edit> loadEditForExamining (ProjectManager& pm, ProjectItemID itemID, Edit::EditRole role)
+std::unique_ptr<Edit> loadEditForExamining (ProjectManager& pm, ProjectItemID itemID, Edit::EditRole role, Edit::LoadContext* loadContext)
 {
-    return Edit::createEditForExamining (pm.engine, loadEditFromProjectManager (pm, itemID), role);
+    return Edit::createEditForExamining (pm.engine, loadEditFromProjectManager (pm, itemID), role, loadContext);
 }
 
 juce::ValueTree loadEditFromFile (Engine& e, const juce::File& f, ProjectItemID itemID)
@@ -480,10 +480,9 @@ juce::ValueTree createEmptyEdit (Engine& e)
     return loadEditFromFile (e, {}, ProjectItemID::createNewID (0));
 }
 
-std::unique_ptr<Edit> loadEditFromFile (Engine& engine, const juce::File& editFile, Edit::EditRole role)
+static std::unique_ptr<Edit> createEdit (Engine& engine, const juce::ValueTree& editState,
+                                         Edit::EditFileRetriever editFileRetriever, Edit::EditRole role)
 {
-    auto editState = loadEditFromFile (engine, editFile, ProjectItemID{});
-
     if (! editState.isValid())
         return {};
 
@@ -500,9 +499,20 @@ std::unique_ptr<Edit> loadEditFromFile (Engine& engine, const juce::File& editFi
         role,
         nullptr,
         Edit::getDefaultNumUndoLevels(),
-        [editFile] { return editFile; },
+        std::move (editFileRetriever),
         {}
     });
+}
+
+std::unique_ptr<Edit> loadEditFromFile (Engine& engine, const juce::File& editFile, Edit::EditRole role)
+{
+    auto editState = loadEditFromFile (engine, editFile, ProjectItemID{});
+    return createEdit (engine, editState, [editFile] { return editFile; }, role);
+}
+
+std::unique_ptr<Edit> loadEditFromState (Engine& engine, const juce::ValueTree& editState, Edit::EditRole role)
+{
+    return createEdit (engine, editState, {}, role);
 }
 
 std::unique_ptr<Edit> createEmptyEdit (Engine& engine, const juce::File& editFile)

@@ -107,9 +107,13 @@ bool EditRenderJob::setUpRender()
                                                   juce::Thread::sleep (100);
                                               }
                                           });
-        juce::ignoreUnused (contextUpdater);
 
-        auto edit = loadEditForExamining (params.engine->getProjectManager(), itemID, Edit::EditRole::forRendering);
+        auto edit = loadEditForExamining (params.engine->getProjectManager(), itemID,
+                                          Edit::EditRole::forRendering, &context);
+
+        // If the load was cancelled becuase the thread was cancelled we need to bail out
+        if (! edit)
+            return false;
 
         // it's difficult to determine the marked region or selections at this point, so we'll ignore it,
         // assuming that this code will only be used for rendering entire EditClips, and not sections of edits.
@@ -429,15 +433,17 @@ bool EditRenderJob::generateSilence (const juce::File& fileToWriteTo)
 {
     CRASH_TRACER
 
-    std::unique_ptr<juce::FileOutputStream> os (fileToWriteTo.createOutputStream());
+    std::unique_ptr<juce::OutputStream> os (fileToWriteTo.createOutputStream());
 
     if (os == nullptr || params.audioFormat == nullptr)
         return false;
 
     const int numChans = params.mustRenderInMono ? 1 : 2;
-    std::unique_ptr<juce::AudioFormatWriter> writer (params.audioFormat->createWriterFor (os.get(), params.sampleRateForAudio,
-                                                                                          (unsigned int) numChans,
-                                                                                          params.bitDepth, {}, 0));
+    std::unique_ptr<juce::AudioFormatWriter> writer (params.audioFormat->createWriterFor (os,
+                                                                                          juce::AudioFormatWriterOptions()
+                                                                                            .withSampleRate (params.sampleRateForAudio)
+                                                                                            .withNumChannels (numChans)
+                                                                                            .withBitsPerSample (params.bitDepth)));
 
     if (writer == nullptr)
         return false;

@@ -19,12 +19,15 @@
 #define GRAPH_UNIT_TESTS_EDITNODE                       1
 
 #define ENGINE_UNIT_TESTS_AUTOMATION                    1
+#define ENGINE_UNIT_TESTS_AUTOMATION_CURVE_LIST         1
 #define ENGINE_UNIT_TESTS_AUX_SEND                      1
+#define ENGINE_UNIT_TESTS_CLICKNODE                     1
 #define ENGINE_UNIT_TESTS_CLIPBOARD                     1
 #define ENGINE_UNIT_TESTS_CLIPSLOT                      1
 #define ENGINE_UNIT_TESTS_CONSTRAINED_CACHED_VALUE      1
 #define ENGINE_UNIT_TESTS_DELAY_PLUGIN                  1
 #define ENGINE_UNIT_TESTS_EDIT                          1
+#define ENGINE_UNIT_TESTS_EDITCLIP                      1
 #define ENGINE_UNIT_TESTS_EDIT_LOADER                   1
 #define ENGINE_UNIT_TESTS_EDIT_TIME                     1
 #define ENGINE_UNIT_TESTS_FREEZE                        1
@@ -41,6 +44,7 @@
 #define ENGINE_UNIT_TESTS_PLAYBACK                      1
 #define ENGINE_UNIT_TESTS_PLUGINS                       1
 #define ENGINE_UNIT_TESTS_PDC                           1
+#define ENGINE_UNIT_TESTS_RACKINSTANCE                  1
 #define ENGINE_UNIT_TESTS_RECORDING                     1
 #define ENGINE_UNIT_TESTS_RENDERING                     1
 #define ENGINE_UNIT_TESTS_TIMESTRETCHER                 1
@@ -52,6 +56,7 @@
 #define ENGINE_UNIT_TESTS_TEMPO_SEQUENCE                1
 #define ENGINE_UNIT_TESTS_QUANTISATION_TYPE             1
 #define ENGINE_UNIT_TESTS_WAVE_INPUT_DEVICE             1
+#define ENGINE_UNIT_TESTS_WAVENODE_READAHEAD            1
 
 // Defined in tracktion_graph
 #define GRAPH_UNIT_TESTS_PLAYHEAD                       1
@@ -70,6 +75,7 @@
 
 #define GRAPH_BENCHMARKS_THREADS                        1
 
+#define ENGINE_BENCHMARKS_AUTOMATIONITERATOR            1
 #define ENGINE_BENCHMARKS_AUDIOFILECACHE                1
 #define ENGINE_BENCHMARKS_CONTAINERCLIP                 1
 #define ENGINE_BENCHMARKS_MIDICLIP                      1

@@ -64,56 +64,73 @@ static const char* datePattern     = "%date%";
 static const char* timePattern     = "%time%";
 static const char* takePattern     = "%take%";
 
-static juce::String expandPatterns (Edit& ed, const juce::String& s, Track* track, int take)
+static juce::String expandPatterns (Edit& ed, juce::String s, Track* track, int take)
 {
-    juce::String editName (TRANS("Unknown"));
-    juce::String trackName (TRANS("Unknown"));
-    auto projDir = juce::File::getCurrentWorkingDirectory().getFullPathName();
-
-    editName = juce::File::createLegalFileName (ed.getName());
-
-    if (track != nullptr)
-        trackName = juce::File::createLegalFileName (track->getName());
-
-    if (auto proj = getProjectForEdit (ed))
     {
-        projDir = proj->getDirectoryForMedia (ProjectItem::Category::recorded).getFullPathName();
+        auto editName = ed.getName();
+
+        if (editName.isEmpty())
+            s = s.replace (juce::String (editPattern) + "_", {}, true);
+
+        s = s.replace (editPattern, editName, true);
     }
-    else if (ed.editFileRetriever)
-    {
-        auto editFile = ed.editFileRetriever();
 
-        if (editFile != juce::File() && editFile.getParentDirectory().isDirectory())
-            projDir = editFile.getParentDirectory().getFullPathName();
+    {
+        juce::String trackName;
+
+        if (track != nullptr)
+            trackName = track->getName();
+
+        if (trackName.isEmpty())
+            s = s.replace (juce::String (trackPattern) + "_", {}, true);
+
+        s = s.replace (trackPattern, trackName, true);
+    }
+
+    {
+        auto projDir = ed.engine.getEngineBehaviour().getDefaultFolderForAudioRecordings (ed);
+
+        if (auto proj = getProjectForEdit (ed))
+        {
+            projDir = proj->getDirectoryForMedia (ProjectItem::Category::recorded);
+        }
+        else if (ed.editFileRetriever)
+        {
+            auto editFile = ed.editFileRetriever();
+
+            if (editFile != juce::File() && editFile.getParentDirectory().isDirectory())
+                projDir = editFile.getParentDirectory();
+
+            if (! projDir.isDirectory())
+                projDir = juce::File::getCurrentWorkingDirectory();
+        }
+
+        s = s.replace (projDirPattern, projDir.getFullPathName(), true);
     }
 
     auto now = juce::Time::getCurrentTime();
 
-    juce::String date;
+    {
+        juce::String date;
 
-    date << now.getDayOfMonth()
-         << juce::Time::getMonthName (now.getMonth(), true)
-         << now.getYear();
+        date << now.getDayOfMonth()
+            << juce::Time::getMonthName (now.getMonth(), true)
+            << now.getYear();
 
-    auto time = juce::String::formatted ("%d%02d%02d",
-                                         now.getHours(),
-                                         now.getMinutes(),
-                                         now.getSeconds());
+        s = s.replace (datePattern, date, true);
+    }
 
-    juce::String s2;
+    s = s.replace (timePattern, juce::String::formatted ("%d%02d%02d",
+                                                         now.getHours(),
+                                                         now.getMinutes(),
+                                                         now.getSeconds()), true);
 
     if (! s.contains (takePattern))
-        s2 = s + "_" + juce::String (takePattern);
-    else
-        s2 = s;
+        s += "_" + juce::String (takePattern);
 
-    return juce::File::createLegalPathName (s2.replace (projDirPattern, projDir, true)
-                                              .replace (editPattern, editName, true)
-                                              .replace (trackPattern, trackName, true)
-                                              .replace (datePattern, date, true)
-                                              .replace (timePattern, time, true)
-                                              .replace (takePattern, juce::String (take), true)
-                                              .trim());
+    s = s.replace (takePattern, juce::String (take), true);
+
+    return juce::File::createLegalPathName (s.trim());
 }
 
 
@@ -286,48 +303,63 @@ public:
         return edit.engine.getAudioFileFormatManager().getNamedFormat (getWaveInput().outputFormat);
     }
 
-    static tl::expected<juce::File, juce::String> getDestinationRecordingFile (Edit& ed, EditItemID targetID,
-                                                                               const juce::AudioFormat& format, juce::String filenameMask)
+    static juce::File getDestinationRecordingFileToTry (Edit& ed, EditItemID targetID,
+                                                        const juce::AudioFormat& format, juce::String filenameMask)
     {
-        juce::File recordedFile;
-        int take = 1;
-
         auto track = findTrackForID (ed, targetID);
 
         if (! track)
             if (auto cs = findClipSlotForID (ed, targetID))
                 track = &cs->track;
 
-        do
-        {
-            recordedFile = juce::File (expandPatterns (ed, filenameMask, track, take++)
-                                         + format.getFileExtensions()[0]);
-        } while (recordedFile.exists());
+        auto fileExtension = format.getFileExtensions()[0];
 
-        if (! recordedFile.getParentDirectory().createDirectory())
+        if (track)
         {
-            TRACKTION_LOG_ERROR ("Record fail: can't create parent directory: " + recordedFile.getFullPathName());
+            auto file = ed.engine.getEngineBehaviour().getFileForNewAudioRecording (*track, fileExtension);
+
+            if (file != juce::File())
+                return file;
+        }
+
+        for (int take = 0;;)
+        {
+            auto file = juce::File (expandPatterns (ed, filenameMask, track, ++take) + fileExtension);
+
+            if (! file.exists())
+               return file;
+        }
+    }
+
+    static tl::expected<juce::File, juce::String> getDestinationRecordingFile (Edit& ed, EditItemID targetID,
+                                                                               const juce::AudioFormat& format, juce::String filenameMask)
+    {
+        auto targetFile = getDestinationRecordingFileToTry (ed, targetID, format, filenameMask);
+
+        if (! targetFile.getParentDirectory().createDirectory())
+        {
+            TRACKTION_LOG_ERROR ("Record fail: can't create parent directory: " + targetFile.getFullPathName());
 
             return TRANS("The directory\nXZZX\ndoesn't exist")
-                .replace ("XZZX", recordedFile.getParentDirectory().getFullPathName());
+                .replace ("XZZX", targetFile.getParentDirectory().getFullPathName());
         }
 
-        if (! recordedFile.getParentDirectory().hasWriteAccess())
+        if (! targetFile.getParentDirectory().hasWriteAccess())
         {
-            TRACKTION_LOG_ERROR ("Record fail: directory is read-only: " + recordedFile.getFullPathName());
+            TRACKTION_LOG_ERROR ("Record fail: directory is read-only: " + targetFile.getFullPathName());
 
             return TRANS("The directory\nXZZX\n doesn't have write-access")
-                .replace ("XZZX", recordedFile.getParentDirectory().getFullPathName());
+                .replace ("XZZX", targetFile.getParentDirectory().getFullPathName());
         }
 
-        if (! recordedFile.deleteFile())
+        if (! targetFile.deleteFile())
         {
-            TRACKTION_LOG_ERROR ("Record fail: can't overwrite file: " + recordedFile.getFullPathName());
+            TRACKTION_LOG_ERROR ("Record fail: can't overwrite file: " + targetFile.getFullPathName());
 
-            return TRANS("Can't overwrite the existing file:") + "\n" + recordedFile.getFullPathName();
+            return TRANS("Can't overwrite the existing file:") + "\n" + targetFile.getFullPathName();
         }
 
-        return recordedFile;
+        return targetFile;
     }
 
     tl::expected<std::unique_ptr<RecordingContext>, juce::String> prepareToRecordTarget (EditItemID targetID, TimeRange punchRange)
@@ -345,7 +377,7 @@ public:
                     return tl::unexpected (TRANS("The current project is read-only, so new clips can't be recorded into it!"));
 
             auto format = getFormatToUse();
-            const auto res = getDestinationRecordingFile (edit, targetID, *format, getWaveInput().filenameMask);
+            const auto res = getDestinationRecordingFile (edit, targetID, *format, getWaveInput().getFilenameMask());
 
             if (! res)
                 return tl::unexpected (res.error());
@@ -802,13 +834,9 @@ public:
             return tl::unexpected (proj->isReadOnly() ? TRANS("Couldn't add the new recording to the project, because the project is read-only")
                                                       : TRANS("Couldn't add the new recording to the project!"));
         }
-        else
-        {
-            return applyLastRecording (rc, nullptr, recordedFile, destClipOwner,
-                                       recordedFileLength, newClipLen, isLooping, isPunching, loopEnd);
-        }
 
-        return {};
+        return applyLastRecording (rc, nullptr, recordedFile, destClipOwner,
+                                    recordedFileLength, newClipLen, isLooping, isPunching, loopEnd);
     }
 
     tl::expected<Clip::Array, juce::String> applyLastRecording (const WaveRecordingContext& rc, const ProjectItem::Ptr projectItem,
@@ -831,7 +859,7 @@ public:
 
         auto endPos = rc.punchTimes.getStart() + newClipLen;
 
-        if (isPunching || context.transport.looping)
+        if (isPunching || isLooping)
             endPos = juce::jlimit (rc.punchTimes.getStart() + 0.5s, loopEnd, endPos);
 
         Clip::Ptr newClip;
@@ -1006,7 +1034,7 @@ public:
                 return nullptr;
 
             auto format = getFormatToUse();
-            const auto res = getDestinationRecordingFile (edit, dstTrack->itemID, *format, getWaveInput().filenameMask);
+            const auto res = getDestinationRecordingFile (edit, dstTrack->itemID, *format, getWaveInput().getFilenameMask());
 
             if (! res)
                 return {};
@@ -1423,7 +1451,7 @@ void WaveInputDevice::closeDevice()
 
 void WaveInputDevice::loadProps()
 {
-    filenameMask = getDefaultMask();
+    filenameMask = {};
     inputGainDb = 0.0f;
     monitorMode = MonitorMode::automatic;
     outputFormat = engine.getAudioFileFormatManager().getDefaultFormat()->getFormatName();
@@ -1438,6 +1466,10 @@ void WaveInputDevice::loadProps()
     if (auto n = engine.getPropertyStorage().getXmlPropertyItem (SettingID::wavein, propName))
     {
         filenameMask = n->getStringAttribute ("filename", filenameMask);
+
+        if (filenameMask == engine.getEngineBehaviour().getDefaultAudioRecordingFilePattern())
+            filenameMask = {};
+
         inputGainDb = (float) n->getDoubleAttribute ("gainDb", inputGainDb);
         monitorMode = magic_enum::enum_cast<MonitorMode> (n->getStringAttribute ("monitorMode").toStdString()).value_or (MonitorMode::automatic);
 
@@ -1462,7 +1494,9 @@ void WaveInputDevice::saveProps()
 {
     juce::XmlElement n ("SETTINGS");
 
-    n.setAttribute ("filename", filenameMask);
+    if (filenameMask.isNotEmpty())
+        n.setAttribute ("filename", filenameMask);
+
     n.setAttribute ("gainDb", inputGainDb);
     n.setAttribute ("monitorMode", std::string (magic_enum::enum_name (monitorMode)));
     n.setAttribute ("format", outputFormat);
@@ -1538,21 +1572,23 @@ void WaveInputDevice::setRecordTriggerDb (float newDB)
     }
 }
 
-juce::String WaveInputDevice::getDefaultMask()
+juce::String WaveInputDevice::getFilenameMask() const
 {
-    juce::String defaultFile;
-    defaultFile << projDirPattern << juce::File::getSeparatorChar() << editPattern << '_'
-                << trackPattern<< '_'  << TRANS("Take") << '_' << takePattern;
+    if (filenameMask.isNotEmpty())
+        return filenameMask;
 
-    return defaultFile;
+    return engine.getEngineBehaviour().getDefaultAudioRecordingFilePattern();
 }
 
 void WaveInputDevice::setFilenameMask (const juce::String& newMask)
 {
     if (filenameMask != newMask)
     {
-        filenameMask = newMask.isNotEmpty() ? newMask
-                                            : getDefaultMask();
+        filenameMask = newMask;
+
+        if (filenameMask == engine.getEngineBehaviour().getDefaultAudioRecordingFilePattern())
+            filenameMask = {};
+
         changed();
         saveProps();
     }
@@ -1560,8 +1596,7 @@ void WaveInputDevice::setFilenameMask (const juce::String& newMask)
 
 void WaveInputDevice::setFilenameMaskToDefault()
 {
-    if (getDefaultMask() != filenameMask)
-        setFilenameMask ({});
+    setFilenameMask ({});
 }
 
 void WaveInputDevice::setBitDepth (int newDepth)

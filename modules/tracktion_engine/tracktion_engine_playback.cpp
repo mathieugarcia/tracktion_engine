@@ -218,6 +218,7 @@ using namespace std::literals;
 #include "playback/graph/tracktion_ArrangerLauncherSwitchingNode.cpp"
 #include "playback/graph/tracktion_AuxSendNode.cpp"
 #include "playback/graph/tracktion_ClickNode.cpp"
+#include "playback/graph/tracktion_ClickNode.test.cpp"
 #include "playback/graph/tracktion_CombiningNode.cpp"
 #include "playback/graph/tracktion_ContainerClipNode.cpp"
 #include "playback/graph/tracktion_DynamicOffsetNode.cpp"
@@ -274,19 +275,6 @@ using namespace std::literals;
 #include "playback/tracktion_TransportControl.test.cpp"
 #include "playback/tracktion_TransportControl.cpp"
 #include "playback/tracktion_AbletonLink.cpp"
-
-#include "playback/audionodes/tracktion_AudioNode.h"
-#include "playback/audionodes/tracktion_CombiningAudioNode.h"
-#include "playback/audionodes/tracktion_WaveAudioNode.h"
-#include "playback/audionodes/tracktion_TrackCompAudioNode.h"
-#include "playback/audionodes/tracktion_SpeedRampAudioNode.h"
-#include "playback/audionodes/tracktion_PluginAudioNode.h"
-#include "playback/audionodes/tracktion_FadeInOutAudioNode.h"
-
-#include "playback/audionodes/tracktion_AudioNode.cpp"
-#include "playback/audionodes/tracktion_FadeInOutAudioNode.cpp"
-#include "playback/audionodes/tracktion_WaveAudioNode.cpp"
-#include "playback/audionodes/tracktion_CombiningAudioNode.cpp"
 
 #include "playback/devices/tracktion_InputDevice.cpp"
 #include "playback/devices/tracktion_MidiInputDevice.cpp"

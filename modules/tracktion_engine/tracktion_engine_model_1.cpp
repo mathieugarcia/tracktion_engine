@@ -14,6 +14,7 @@
 #include <chrono>
 
 #include "3rd_party/magic_enum/tracktion_magic_enum.hpp"
+#include "3rd_party/nanorange/tracktion_nanorange.hpp"
 
 using namespace std::literals;
 
@@ -43,8 +44,12 @@ using namespace std::literals;
 
 #include "model/automation/tracktion_AutomatableEditItem.cpp"
 #include "model/automation/tracktion_AutomatableParameter.cpp"
+#include "model/automation/tracktion_AutomatableParameter.test.cpp"
 #include "model/automation/tracktion_MacroParameter.cpp"
 #include "model/automation/tracktion_AutomationCurve.cpp"
+#include "model/automation/tracktion_AutomationCurveList.cpp"
+#include "model/automation/tracktion_AutomationCurveList.test.cpp"
+#include "model/automation/tracktion_AutomationMode.cpp"
 #include "model/automation/tracktion_AutomationRecordManager.cpp"
 #include "model/automation/tracktion_MidiLearn.cpp"
 #include "model/automation/tracktion_ParameterChangeHandler.cpp"
@@ -64,6 +69,7 @@ using namespace std::literals;
 #include "model/clips/tracktion_WaveAudioClip.cpp"
 #include "model/clips/tracktion_ChordClip.cpp"
 #include "model/clips/tracktion_EditClip.cpp"
+#include "model/clips/tracktion_EditClip.test.cpp"
 #include "model/clips/tracktion_FollowActions.cpp"
 #include "model/clips/tracktion_FollowActions.test.cpp"
 #include "model/clips/tracktion_LauncherClipPlaybackHandle.cpp"

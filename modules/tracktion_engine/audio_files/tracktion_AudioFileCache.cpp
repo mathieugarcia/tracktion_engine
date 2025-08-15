@@ -705,7 +705,7 @@ void AudioFileCache::purgeOldFiles()
 
     const juce::ScopedWriteLock sl (fileListLock);
 
-    for (auto f :  activeFiles)
+    for (auto f : activeFiles)
         f->purgeOrphanReaders();
 
     for (int i = activeFiles.size(); --i >= 0;)
@@ -951,9 +951,17 @@ bool AudioFileCache::Reader::readSamples (int numSamples,
         float* chans[2] = {};
         bool dupeChannel = false;
 
+        auto leftIndex = [&]
+                         {
+                            if (auto l = sourceBufferChannels.getChannelIndexForType (juce::AudioChannelSet::left); l >= 0)
+                                return l;
+
+                            return sourceBufferChannels.getChannelIndexForType (juce::AudioChannelSet::centre);
+                         }();
+
         if (numDestChans > 1)
         {
-            if (sourceBufferChannels.getChannelIndexForType (juce::AudioChannelSet::left) >= 0
+            if (leftIndex >= 0
                  && sourceBufferChannels.getChannelIndexForType (juce::AudioChannelSet::right) >= 0)
             {
                 chans[0] = destBuffer.getWritePointer (0, startOffsetInDestBuffer);
@@ -963,7 +971,7 @@ bool AudioFileCache::Reader::readSamples (int numSamples,
                 else
                     dupeChannel = true;
             }
-            else if (sourceBufferChannels.getChannelIndexForType (juce::AudioChannelSet::left) >= 0)
+            else if (leftIndex >= 0)
             {
                 chans[0] = destBuffer.getWritePointer (0, startOffsetInDestBuffer);
                 dupeChannel = true;
@@ -976,7 +984,7 @@ bool AudioFileCache::Reader::readSamples (int numSamples,
         }
         else
         {
-            if (sourceBufferChannels.getChannelIndexForType (juce::AudioChannelSet::left) >= 0 || getNumChannels() < 2)
+            if (leftIndex >= 0 || getNumChannels() < 2)
                 chans[0] = destBuffer.getWritePointer (0, startOffsetInDestBuffer);
             else
                 chans[1] = destBuffer.getWritePointer (0, startOffsetInDestBuffer);
@@ -1001,6 +1009,14 @@ bool AudioFileCache::Reader::readSamples (int numSamples,
             }
 
             return true;
+        }
+        else if (dupeChannel)
+        {
+            // If the read failed, we still need to dupe the channel as only one will contain cleared samples
+            if (chans[0] == nullptr)
+                juce::FloatVectorOperations::copy (destBuffer.getWritePointer (0), chans[1], numSamples);
+            else if (chans[1] == nullptr)
+                juce::FloatVectorOperations::copy (destBuffer.getWritePointer (1), chans[0], numSamples);
         }
     }
 

@@ -26,7 +26,7 @@ struct Edit::UndoTransactionTimer   : private juce::Timer,
     {
         // Add the change listener asyncronously to avoid messages coming in
         // from the Edit initialisation phase
-        juce::MessageManager::callAsync ([ref = juce::WeakReference<UndoTransactionTimer> (this)]
+        juce::MessageManager::callAsync ([ref = makeWeakRef (*this)]
                                          {
                                              if (ref != nullptr)
                                                  ref->edit.getUndoManager().addChangeListener (ref.get());
@@ -445,6 +445,13 @@ struct Edit::TreeWatcher   : public juce::ValueTree::Listener
                 return true;
             });
 
+            edit.clipSlotCache.visitItems ([&] (auto cs)
+            {
+                if (auto c = cs->getClip())
+                    if (c->getLinkGroupID().isNotEmpty())
+                        linkedClipsMap[c->getLinkGroupID()].add(c);
+            });
+
             linkedClipsMapDirty = false;
         }
 
@@ -692,9 +699,16 @@ Edit::~Edit()
         af->hideWindowForShutdown();
 
     for (auto at : getTracksOfType<AudioTrack> (*this, true))
+    {
         for (auto c : at->getClips())
+        {
             if (auto acb = dynamic_cast<AudioClipBase*> (c))
+            {
+                acb->flushStateToValueTree();
                 acb->hideMelodyneWindow();
+            }
+        }
+    }
 
     engine.getActiveEdits().edits.removeFirstMatchingValue (this);
     masterReference.clear();
@@ -722,8 +736,9 @@ Edit::~Edit()
 
     undoManager.clearUndoHistory();
 
-    for (auto rt : rackTypes->getTypes())
-        rt->hideWindowForShutdown();
+    if (rackTypes->isInitialised())
+        for (auto rt : rackTypes->getTypes())
+            rt->hideWindowForShutdown();
 
     pluginCache.reset();
 
@@ -761,7 +776,7 @@ void Edit::setProjectItemID (ProjectItemID newID)
 }
 
 Edit::ScopedRenderStatus::ScopedRenderStatus (Edit& ed, bool shouldReallocateOnDestruction)
-    : edit (ed), reallocateOnDestruction (shouldReallocateOnDestruction)
+    : edit (ed), reallocateOnDestruction (shouldReallocateOnDestruction && edit.getTransport().isPlayContextActive())
 {
     TRACKTION_ASSERT_MESSAGE_THREAD
     jassert (edit.performingRenderCount >= 0);
@@ -840,13 +855,19 @@ void Edit::initialise (const Options& options)
                       // Must be set to false before curve updates
                       // but set inside here to give the message loop some time to dispatch async updates
                       isLoadInProgress = false;
+                      auto cursorPos = getTransport().getPosition();
 
                       for (auto mpl : getAllMacroParameterLists (*this))
                           for (auto mp : mpl->getMacroParameters())
                               mp->initialise();
 
                       for (auto ap : getAllAutomatableParams (true))
+                      {
                           ap->updateStream();
+
+                          if (ap->isAutomationActive())
+                              ap->updateFromAutomationSources (cursorPos);
+                      }
 
                       for (auto effect : getAllClipEffects (*this))
                           effect->initialise();
@@ -949,10 +970,10 @@ void Edit::initialiseMasterVolume (const Options& options)
         const float masterVolumeFaderPos = gainToVolumeFaderPosition (volGain);
         const float masterPan = (rightGain - volGain) / volGain;
 
-        getMasterSliderPosParameter()->getCurve().clear();
+        getMasterSliderPosParameter()->getCurve().clear (um);
         getMasterSliderPosParameter()->setParameter (masterVolumeFaderPos, juce::dontSendNotification);
 
-        getMasterPanParameter()->getCurve().clear();
+        getMasterPanParameter()->getCurve().clear (um);
         getMasterPanParameter()->setParameter (masterPan, juce::dontSendNotification);
     }
 }
@@ -2359,6 +2380,15 @@ void Edit::setLowLatencyDisabledPlugins (const juce::Array<EditItemID>& newPlugi
     lowLatencyDisabledPlugins = newPlugins;
 }
 
+void Edit::setLatencyCompensationEnabled (bool enabled)
+{
+    if (enabled != latencyCompensationEnabled)
+    {
+        latencyCompensationEnabled = enabled;
+        restartPlayback();
+    }
+}
+
 //==============================================================================
 void Edit::initialiseAllPlugins()
 {
@@ -3316,10 +3346,16 @@ std::unique_ptr<Edit> Edit::createEditForPreviewingClip (Clip& clip)
 
 std::unique_ptr<Edit> Edit::createSingleTrackEdit (Engine& e, EditRole roleToUse)
 {
-    return std::make_unique<Edit> (e, roleToUse);
+    auto edit = std::make_unique<Edit> (e, roleToUse);
+
+    if (edit->isFullyConstructed)
+        return edit;
+
+    e.getEditDeleter().deleteEdit (std::move (edit));
+    return {};
 }
 
-std::unique_ptr<Edit> Edit::createEditForExamining (Engine& e, juce::ValueTree editState, EditRole roleToUse)
+std::unique_ptr<Edit> Edit::createEditForExamining (Engine& e, juce::ValueTree editState, EditRole roleToUse, LoadContext* loadContextToUse)
 {
     return createEdit (Options
     {
@@ -3327,7 +3363,7 @@ std::unique_ptr<Edit> Edit::createEditForExamining (Engine& e, juce::ValueTree e
         editState,
         ProjectItemID::fromProperty (editState, IDs::projectID),
         roleToUse,
-        nullptr,
+        loadContextToUse,
         1, // undo levels
         {},
         {},

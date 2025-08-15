@@ -49,10 +49,13 @@ void InputDevice::setAlias (const juce::String& a)
         if (alias == getName())
             alias = {};
 
-        if (alias.isNotEmpty())
-            engine.getPropertyStorage().setPropertyItem (SettingID::invalid, getAliasPropName(), alias);
-        else
-            engine.getPropertyStorage().removePropertyItem (SettingID::invalid, getAliasPropName());
+        if (! isTrackDevice())
+        {
+            if (alias.isNotEmpty())
+                engine.getPropertyStorage().setPropertyItem (SettingID::invalid, getAliasPropName(), alias);
+            else
+                engine.getPropertyStorage().removePropertyItem (SettingID::invalid, getAliasPropName());
+        }
     }
 }
 
@@ -114,7 +117,7 @@ InputDeviceInstance::~InputDeviceInstance()
 
 juce::Array<EditItemID> InputDeviceInstance::getTargets() const
 {
-    juce::WeakReference<InputDeviceInstance> ref (const_cast<InputDeviceInstance*> (this));
+    auto ref = makeWeakRef (*const_cast<InputDeviceInstance*> (this));
     trackDeviceEnabler.handleUpdateNowIfNeeded();
 
     if (ref.wasObjectDeleted())
